@@ -1,0 +1,16 @@
+.graph-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18rem;
+  gap: var(--mantine-spacing-md);
+}
+
+.graph-card { min-height: 34rem; overflow: hidden; }
+.graph-toolbar { border-bottom: 1px solid var(--mantine-color-dark-4); background: color-mix(in srgb, var(--mantine-color-dark-7) 80%, transparent); }
+.graph-stage { width: 100%; height: 29rem; background: radial-gradient(circle at center, #17233a, #0b1020 75%); }
+.details-card { align-self: start; }
+
+@media (max-width: 720px) {
+  .graph-layout { grid-template-columns: 1fr; }
+  .graph-card, .graph-stage { min-height: 26rem; height: 26rem; }
+  .graph-toolbar { align-items: stretch; flex-wrap: wrap; }
+}

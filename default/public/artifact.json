@@ -1,0 +1,36 @@
+{
+  "specVersion": 1,
+  "artifact": {
+    "id": "artifactd-home",
+    "name": "Artifactd Home",
+    "description": "Your local artifact library"
+  },
+  "code": {
+    "format": "files",
+    "entry": "index.html",
+    "stack": {
+      "preset": "react-mantine",
+      "target": "browser",
+      "languages": ["typescript", "tsx", "css"],
+      "framework": {
+        "id": "react",
+        "version": "19"
+      },
+      "uiKit": {
+        "id": "mantine",
+        "version": "9"
+      },
+      "build": {
+        "type": "bundler",
+        "tool": "vite",
+        "version": "8",
+        "output": "static"
+      }
+    }
+  },
+  "runtime": {
+    "id": "web-static",
+    "version": 1
+  },
+  "capabilities": []
+}

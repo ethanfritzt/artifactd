@@ -1,0 +1,35 @@
+# Go build and test artifacts
+/bin/
+/artifact
+/artifactd
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+coverage.out
+
+# JavaScript dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local application data
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+!.env.example
+
+# Editor and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~

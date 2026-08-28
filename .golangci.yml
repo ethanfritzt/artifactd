@@ -1,0 +1,13 @@
+version: "2"
+run:
+  timeout: 2m
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errcheck
+    - govet
+    - nilerr
+    - sqlclosecheck
+    - staticcheck
+    - testifylint

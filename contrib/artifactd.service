@@ -1,0 +1,12 @@
+[Unit]
+Description=artifactd local artifact daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/artifactd
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target
