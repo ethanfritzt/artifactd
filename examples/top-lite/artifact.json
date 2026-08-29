@@ -1,0 +1,17 @@
+{
+  "specVersion": 1,
+  "artifact": {
+    "id": "top-lite",
+    "name": "Top Lite",
+    "description": "A live, calm view of Linux system activity"
+  },
+  "code": {
+    "format": "files",
+    "entry": "index.html"
+  },
+  "runtime": {
+    "id": "web-static",
+    "version": 1
+  },
+  "capabilities": []
+}

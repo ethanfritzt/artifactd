@@ -30,17 +30,95 @@ var artifactHostID = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 const liveClientScript = `(() => {
   const events = new EventSource("/_artifactd/events");
+  const setBuilding = (building) => {
+    document.documentElement.classList.toggle("artifactd-building", building);
+    if (building) {
+      document.documentElement.setAttribute("aria-busy", "true");
+    } else {
+      document.documentElement.removeAttribute("aria-busy");
+    }
+  };
+  const pollStatus = async () => {
+    try {
+      const response = await fetch("/_artifactd/live", { cache: "no-store" });
+      if (response.ok) {
+        const status = await response.json();
+        setBuilding(status.status === "building");
+      }
+    } catch (_) {
+      // The event stream remains the source of truth for refreshes.
+    }
+    window.setTimeout(pollStatus, 100);
+  };
+  pollStatus();
   events.onmessage = (message) => {
     try {
       const event = JSON.parse(message.data);
       if (event.type === "artifact_changed") {
+        setBuilding(false);
         window.location.reload();
+      } else if (event.type === "artifact_error") {
+        // Keep the last valid preview usable when an edit is incomplete.
+        setBuilding(false);
       }
     } catch (_) {
       // Ignore malformed events; the next connection will retry automatically.
     }
   };
 })();
+`
+
+const livePreviewCSS = `.artifactd-live-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: grid;
+  place-items: center;
+  gap: .9rem;
+  align-content: center;
+  color: CanvasText;
+  background: rgba(255, 255, 255, .72);
+  background: color-mix(in srgb, Canvas 72%, transparent);
+  backdrop-filter: blur(12px) saturate(.75);
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition: opacity .18s ease, visibility .18s ease;
+  font: 500 .95rem/1.4 system-ui, sans-serif;
+}
+.artifactd-live-overlay__content {
+  display: grid;
+  justify-items: center;
+  gap: .75rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+  border-radius: 1rem;
+  background: color-mix(in srgb, Canvas 88%, transparent);
+  box-shadow: 0 .75rem 2rem #0002;
+}
+.artifactd-live-overlay__spinner {
+  width: 1.5rem;
+  height: 1.5rem;
+  border: .18rem solid color-mix(in srgb, CanvasText 20%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: artifactd-live-spin .8s linear infinite;
+}
+html.artifactd-building .artifactd-live-overlay {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+@keyframes artifactd-live-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .artifactd-live-overlay { transition: none; }
+  .artifactd-live-overlay__spinner { animation: none; }
+}
+@media print {
+  .artifactd-live-overlay { display: none; }
+}
 `
 
 const artifactNavigationCSS = `.artifactd-navigation {
@@ -144,7 +222,7 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 	}
 	root := version.Path
 	entry := version.Entry
-	livePreview := s.live != nil
+	livePreview := false
 	if s.live != nil {
 		if snapshot, release, ok := s.live.Snapshot(artifact.ID); ok {
 			defer release()
@@ -190,7 +268,7 @@ func (s *Server) serveLegacyPath(w http.ResponseWriter, r *http.Request) {
 	}
 	root := version.Path
 	entry := version.Entry
-	livePreview := s.live != nil
+	livePreview := false
 	if s.live != nil {
 		if snapshot, release, ok := s.live.Snapshot(artifact.ID); ok {
 			defer release()
@@ -212,6 +290,10 @@ func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID
 	parts := strings.Split(runtimePath, "/")
 	if len(parts) == 1 && parts[0] == "live.js" {
 		s.serveLiveClient(w)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "live.css" {
+		s.serveLiveCSS(w)
 		return
 	}
 	if len(parts) == 1 && parts[0] == "navigation.css" {
@@ -347,9 +429,19 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, artifactID 
 
 func (s *Server) serveLiveClient(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	if _, err := fmt.Fprint(w, liveClientScript); err != nil {
 		slog.Error("writing live client", "error", err)
+	}
+}
+
+func (s *Server) serveLiveCSS(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if _, err := fmt.Fprint(w, livePreviewCSS); err != nil {
+		slog.Error("writing live preview stylesheet", "error", err)
 	}
 }
 
@@ -410,11 +502,19 @@ func (s *Server) serveHTML(
 }
 
 func injectLiveClient(content []byte) []byte {
-	const script = `<script data-artifactd-live src="/_artifactd/live.js"></script>`
-	if bytes.Contains(content, []byte(`data-artifactd-live`)) {
+	const marker = `data-artifactd-live`
+	if bytes.Contains(content, []byte(marker)) {
 		return content
 	}
-	return injectBeforeBodyClose(content, script)
+	injected := `<link rel="stylesheet" href="/_artifactd/live.css">
+<div class="artifactd-live-overlay" data-artifactd-live-overlay role="status" aria-live="polite">
+  <div class="artifactd-live-overlay__content">
+    <div class="artifactd-live-overlay__spinner" aria-hidden="true"></div>
+    <span>Building preview…</span>
+  </div>
+</div>
+<script data-artifactd-live src="/_artifactd/live.js"></script>`
+	return injectBeforeBodyClose(content, injected)
 }
 
 func injectArtifactNavigation(content []byte, homeURL string) []byte {

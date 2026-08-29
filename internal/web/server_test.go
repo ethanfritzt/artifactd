@@ -183,8 +183,20 @@ func TestServerServesLiveSnapshot(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), "data-artifactd-live") {
 		t.Fatal("live HTML did not contain the refresh client")
 	}
-	if !strings.Contains(recorder.Body.String(), "data-artifactd-navigation") {
+	body := recorder.Body.String()
+	if !strings.Contains(body, "data-artifactd-navigation") {
 		t.Fatal("live HTML did not contain artifact navigation")
+	}
+	if !strings.Contains(body, "data-artifactd-live-overlay") || !strings.Contains(body, "/_artifactd/live.css") {
+		t.Fatal("live HTML did not contain the build overlay")
+	}
+
+	cssRecorder := httptest.NewRecorder()
+	cssRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/live.css", nil)
+	cssRequest.Host = "demo.artifacts.localhost"
+	server.Handler().ServeHTTP(cssRecorder, cssRequest)
+	if cssRecorder.Code != http.StatusOK || !strings.Contains(cssRecorder.Body.String(), "artifactd-building") {
+		t.Fatalf("live stylesheet response = %d %s", cssRecorder.Code, cssRecorder.Body.String())
 	}
 
 	clientRecorder := httptest.NewRecorder()

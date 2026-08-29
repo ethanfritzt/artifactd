@@ -22,7 +22,7 @@ Keep three concepts separate:
 
 A file save must not automatically create a registry version. Otherwise normal editing would create excessive versions and make rollback/history noisy.
 
-The first implementation should provide browser reload rather than true module-level HMR. Reloading is sufficient for standalone HTML and built React output; preserving React component state can be considered later.
+The first implementation should provide browser reload rather than module-level HMR. While the snapshot is being assembled, the browser keeps the last valid page behind a blurred loading overlay. Reloading is sufficient for standalone HTML, CSS, and JavaScript artifacts.
 
 ## Current gaps
 
@@ -49,8 +49,7 @@ The live feature must not serve a workspace directory directly. Direct serving c
 Initial API recommendation:
 
 ```bash
-artifact create --id demo
-artifact publish demo            # optional initial durable checkpoint
+artifact create --id demo       # publishes the initial scaffold
 artifact watch demo              # starts live preview for this artifact
 ```
 
@@ -217,7 +216,7 @@ Only after reload-based preview is reliable:
 
 - preserve selected browser state across refreshes where practical
 - support build commands through an explicitly managed authoring process, without giving published artifacts arbitrary shell access
-- investigate true HMR for optional React/Vite projects
+- investigate state-preserving live editing for future authoring helpers
 - add structured agent actions from the artifact UI as a separate capability
 
 ## Concurrency and failure rules
@@ -286,5 +285,5 @@ This feature does not initially provide:
 - conflict-free replicated editing (OT/CRDT)
 - automatic durable version creation on every save
 - a Node server or package runtime inside artifactd
-- true React state-preserving HMR
+- state-preserving live editing
 - remote or cloud deployment

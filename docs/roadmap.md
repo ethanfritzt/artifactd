@@ -31,11 +31,9 @@ This roadmap is directional. The project should advance based on whether the cor
 
 ## Phase 3 — Artifact authoring and library
 
-- versioned artifact specification with source stack and runtime metadata
-- dependency-free static web authoring scaffold as the default
-- optional React/Vite/Mantine authoring preset
-- opt-in Cytoscape graph feature
-- reproducible static frontend builds
+- versioned artifact specification with runtime metadata
+- dependency-free static web authoring scaffold
+- direct static artifact publishing and live preview
 - design guidance and reliable artifact states
 - `artifacts.localhost` library
 - visual cards and metadata
@@ -61,12 +59,12 @@ This roadmap is directional. The project should advance based on whether the cor
 
 ## Later possibilities
 
-- Svelte or another constrained source runtime
+- richer static authoring helpers
 - agent bridge and interactive actions
 - typed artifact outputs and composition
 - provenance and semantic search
 - desktop `.desktop` entries
-- state-preserving HMR for optional React/Vite projects
+- state-preserving live editing for future authoring helpers
 - fork/eject workflows
 - optional sharing and remote runtimes
 - open artifact protocol specification

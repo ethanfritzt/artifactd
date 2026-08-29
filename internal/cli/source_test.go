@@ -51,20 +51,3 @@ func TestResolveArtifactDirectory(t *testing.T) {
 		})
 	}
 }
-
-func TestResolveArtifactDirectoryUsesReactBuildOutput(t *testing.T) {
-	dataDir := t.TempDir()
-	managed := filepath.Join(dataDir, "sources", "demo")
-	if err := os.MkdirAll(filepath.Join(managed, "dist"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := resolveArtifactDirectory("demo", dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := filepath.Join(managed, "dist")
-	if got != want {
-		t.Fatalf("resolved directory = %q, want %q", got, want)
-	}
-}

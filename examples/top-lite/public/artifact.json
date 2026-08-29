@@ -1,8 +1,0 @@
-{
-  "artifactVersion": 1,
-  "id": "top-lite",
-  "name": "Top Lite",
-  "description": "A live, calm view of Linux system activity",
-  "entry": "index.html",
-  "runtime": "web"
-}

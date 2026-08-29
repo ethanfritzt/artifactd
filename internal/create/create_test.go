@@ -32,14 +32,6 @@ func TestRunCreatesScaffold(t *testing.T) {
 	if !ok || artifact["id"] != "demo" {
 		t.Fatalf("artifact id = %v, want demo", artifact["id"])
 	}
-	code, ok := value["code"].(map[string]any)
-	if !ok {
-		t.Fatalf("code = %v, want object", value["code"])
-	}
-	stack, ok := code["stack"].(map[string]any)
-	if !ok || stack["preset"] != "static-web" {
-		t.Fatalf("stack preset = %v, want static-web", stack["preset"])
-	}
 	runtime, ok := value["runtime"].(map[string]any)
 	if !ok || runtime["id"] != "web-static" {
 		t.Fatalf("runtime id = %v, want web-static", runtime["id"])

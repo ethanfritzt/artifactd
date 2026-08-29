@@ -20,8 +20,6 @@ type Options struct {
 	ID          string
 	Name        string
 	Description string
-	Template    string
-	Features    []string
 	Force       bool
 }
 
@@ -42,16 +40,6 @@ func Run(options Options) error {
 	if err := validateOptions(options); err != nil {
 		return err
 	}
-	if options.Template == "" {
-		options.Template = StaticTemplate
-	}
-	if err := validateTemplate(options); err != nil {
-		return err
-	}
-	if options.Template == ReactTemplate {
-		return runReact(options)
-	}
-
 	created := false
 	if err := os.Mkdir(options.Directory, 0o750); err != nil {
 		if !os.IsExist(err) {
@@ -107,24 +95,6 @@ func validateOptions(options Options) error {
 	return nil
 }
 
-func validateTemplate(options Options) error {
-	switch options.Template {
-	case StaticTemplate:
-		if len(options.Features) > 0 {
-			return fmt.Errorf("template %q does not support features", StaticTemplate)
-		}
-	case ReactTemplate:
-		for _, feature := range options.Features {
-			if feature != GraphFeature {
-				return fmt.Errorf("unsupported React feature %q", feature)
-			}
-		}
-	default:
-		return fmt.Errorf("unsupported template %q", options.Template)
-	}
-	return nil
-}
-
 func slug(value string) string {
 	value = strings.ToLower(value)
 	value = slugPattern.ReplaceAllString(value, "-")
@@ -152,22 +122,19 @@ func manifestJSON(options Options) ([]byte, error) {
 			Description string `json:"description,omitempty"`
 		} `json:"artifact"`
 		Code struct {
-			Format string             `json:"format"`
-			Entry  string             `json:"entry"`
-			Stack  manifest.StackSpec `json:"stack"`
+			Format string `json:"format"`
+			Entry  string `json:"entry"`
 		} `json:"code"`
 		Runtime      manifest.RuntimeSpec `json:"runtime"`
 		Capabilities []string             `json:"capabilities"`
 	}{
 		SpecVersion: manifest.CurrentVersion,
 		Code: struct {
-			Format string             `json:"format"`
-			Entry  string             `json:"entry"`
-			Stack  manifest.StackSpec `json:"stack"`
+			Format string `json:"format"`
+			Entry  string `json:"entry"`
 		}{
 			Format: "files",
 			Entry:  "index.html",
-			Stack:  stackForTemplate(options.Template),
 		},
 		Runtime:      manifest.RuntimeSpec{ID: manifest.DefaultRuntimeID, Version: manifest.CurrentRuntimeVersion},
 		Capabilities: []string{},

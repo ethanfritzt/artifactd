@@ -35,10 +35,6 @@ func resolveArtifactDirectory(argument, dataDir string) (string, error) {
 		if _, manifestErr := os.Stat(filepath.Join(managed, "artifact.json")); manifestErr == nil {
 			return managed, nil
 		}
-		built := filepath.Join(managed, "dist")
-		if builtInfo, builtErr := os.Stat(built); builtErr == nil && builtInfo.IsDir() {
-			return built, nil
-		}
 		return managed, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("checking managed artifact source: %w", err)

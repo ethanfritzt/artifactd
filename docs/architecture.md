@@ -74,9 +74,9 @@ artifact archive <artifact-id>
 artifact unarchive <artifact-id>
 ```
 
-`create` writes a standalone artifact scaffold into Artifactd's managed `sources/<artifact-id>/` directory by default, keeping the current repository untouched. Use `--path <directory>` for an explicit repository-local source. It supports the dependency-free `static-web` authoring stack by default and an optional React/Vite/Mantine authoring preset with opt-in features. Both target the `web-static` runtime; React projects build to static output before `publish` streams the directory to the daemon. `publish` and `watch` accept either a source directory or a managed artifact ID. `list` requests metadata from the daemon and formats it for humans or scripts; archived artifacts are omitted unless `--include-archived` is used.
+`create` writes a dependency-free HTML/CSS/JavaScript artifact scaffold into Artifactd's managed `sources/<artifact-id>/` directory by default, keeping the current repository untouched, and automatically publishes the initial scaffold when the daemon is available. Use `--path <directory>` for an explicit repository-local source. `publish` and `watch` accept either a source directory or a managed artifact ID. `list` requests metadata from the daemon and formats it for humans or scripts; archived artifacts are omitted unless `--include-archived` is used.
 
-The CLI uses Cobra and Viper for flags, environment variables, and optional configuration. Results go to stdout; diagnostics go to stderr. `artifact create` selects from authoring stack descriptors: the dependency-free static scaffold or the optional React/Vite/Mantine scaffold with features such as Cytoscape graph support. Stack descriptors create source projects and metadata; they do not add daemon runtime behavior.
+The CLI uses Cobra and Viper for flags, environment variables, and optional configuration. Results go to stdout; diagnostics go to stderr. `artifact create` generates the dependency-free static scaffold directly.
 
 ## Daemon and IPC
 
@@ -98,7 +98,7 @@ POST /v1/artifacts/{id}/archive
 DELETE /v1/artifacts/{id}/archive
 ```
 
-The browser listener exposes only artifact content, scoped runtime reads, and live-preview events. It does not expose registry mutation endpoints. For non-home HTML entrypoints, it also adds daemon-owned library navigation at response time; this platform chrome is not stored in artifact versions and is independent of the authoring stack.
+The browser listener exposes only artifact content, scoped runtime reads, and live-preview events. Live HTML receives a daemon-owned loading overlay: it blurs the last valid page while a new snapshot is being assembled, then refreshes after validation. It does not expose registry mutation endpoints. For non-home HTML entrypoints, it also adds daemon-owned library navigation at response time; this platform chrome is not stored in artifact versions.
 
 These endpoints are available only over a Unix domain socket at `$XDG_RUNTIME_DIR/artifactd.sock` when that directory exists. The socket is restricted to the current user.
 
@@ -148,7 +148,7 @@ The legacy path form remains available for static content and redirects artifact
 
 Artifacts are frontend code. Artifactd providers expose narrow, read-only data such as system metrics and workspace file metadata. The system provider reads Linux system interfaces directly and never executes shell commands. The filesystem provider is rooted at the artifact's registered workspace and rejects traversal and symlink escapes.
 
-Pi agents can push structured JSON from CLI or MCP tools over the Unix socket. Credentials and tool execution remain inside Pi; browser code cannot invoke MCP or arbitrary commands. Optional React artifacts are built by the authoring environment into static output; artifactd never installs dependencies or executes their build commands. Runtime data and live preview snapshots are ephemeral and separate from immutable artifact versions. Live mode never serves the source directory directly; it serves a validated copied snapshot and notifies the artifact-specific browser origin through SSE.
+Pi agents can push structured JSON from CLI or MCP tools over the Unix socket. Credentials and tool execution remain inside Pi; browser code cannot invoke MCP or arbitrary commands. Runtime data and live preview snapshots are ephemeral and separate from immutable artifact versions. Live mode never serves the source directory directly; it serves a validated copied snapshot and notifies the artifact-specific browser origin through SSE.
 
 Artifacts are treated as untrusted browser code. Artifact-specific localhost origins prevent one artifact from reading another artifact's runtime data, and filesystem paths are validated at every boundary. Writes, process control, secrets, and command execution are not ambient runtime permissions.
 

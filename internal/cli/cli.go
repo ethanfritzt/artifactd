@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 
 	"artifactd/internal/config"
@@ -54,14 +55,17 @@ func NewCommand() *cobra.Command {
 }
 
 func createCommand(v *viper.Viper, app *Application) *cobra.Command {
-	var id, path, name, description, template string
-	var features []string
-	var force bool
+	var id, path, name, description string
+	var force, open bool
 	command := &cobra.Command{
 		Use:   "create [artifact-id]",
-		Short: "Create a standalone artifact scaffold",
+		Short: "Create and publish a standalone artifact scaffold",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(v, app.configFile)
+			if err != nil {
+				return err
+			}
 			effectiveID := id
 			if len(args) == 1 {
 				if effectiveID != "" {
@@ -73,10 +77,6 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 			if directory == "" {
 				if effectiveID == "" {
 					return fmt.Errorf("artifact ID is required unless --path is provided")
-				}
-				cfg, err := config.Load(v, app.configFile)
-				if err != nil {
-					return err
 				}
 				directory, err = config.ManagedSourcePath(cfg.DataDir, effectiveID)
 				if err != nil {
@@ -91,11 +91,25 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 				ID:          effectiveID,
 				Name:        name,
 				Description: description,
-				Template:    template,
-				Features:    features,
 				Force:       force,
 			}); err != nil {
 				return err
+			}
+			if result, publishErr := ipc.NewClient(cfg.SocketPath).Publish(cmd.Context(), directory); publishErr == nil {
+				if cmd.OutOrStdout() != cmd.ErrOrStderr() {
+					if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "published: %s\n", result.URL); err != nil {
+						return fmt.Errorf("writing publish result: %w", err)
+					}
+				}
+				if open {
+					if err := openBrowser(cmd.Context(), result.URL); err != nil {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open artifact in browser: %v\n", err)
+					}
+				}
+			} else if !daemonUnavailable(publishErr) {
+				return fmt.Errorf("auto-publishing artifact: %w", publishErr)
+			} else if cmd.OutOrStdout() != cmd.ErrOrStderr() {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: artifactd is unavailable; scaffold was not published\n")
 			}
 			if _, err := fmt.Fprintln(cmd.OutOrStdout(), filepath.Clean(directory)); err != nil {
 				return fmt.Errorf("writing create result: %w", err)
@@ -107,10 +121,15 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 	command.Flags().StringVar(&path, "path", "", "explicit local source directory (default: Artifactd-managed source)")
 	command.Flags().StringVar(&name, "name", "", "artifact name")
 	command.Flags().StringVar(&description, "description", "", "artifact description")
-	command.Flags().StringVar(&template, "template", create.StaticTemplate, "authoring template: static or react (React/Mantine)")
-	command.Flags().StringSliceVar(&features, "feature", nil, "optional React feature (repeatable): graph")
 	command.Flags().BoolVar(&force, "force", false, "overwrite generated files")
+	command.Flags().BoolVar(&open, "open", false, "open the published artifact in the default browser")
 	return command
+}
+
+func daemonUnavailable(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connecting to artifactd") &&
+		(strings.Contains(message, "dial unix") || strings.Contains(message, "connection refused") || strings.Contains(message, "no such file"))
 }
 
 func listCommand(v *viper.Viper, app *Application) *cobra.Command {

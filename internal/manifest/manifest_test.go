@@ -38,7 +38,7 @@ func TestValidateDirectory(t *testing.T) {
 		},
 		{
 			name:     "structured specification",
-			manifest: `{"specVersion":1,"artifact":{"id":"demo","name":"Demo"},"code":{"format":"files","entry":"index.html","stack":{"preset":"static-web","target":"browser","languages":["html","css","javascript"]}},"runtime":{"id":"web-static","version":1}}`,
+			manifest: `{"specVersion":1,"artifact":{"id":"demo","name":"Demo"},"code":{"format":"files","entry":"index.html"},"runtime":{"id":"web-static","version":1}}`,
 			entry:    "index.html",
 		},
 		{

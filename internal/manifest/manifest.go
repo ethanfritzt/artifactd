@@ -38,37 +38,10 @@ type Manifest struct {
 	Capabilities    []json.RawMessage
 }
 
-// CodeSpec describes the files and authoring stack that produced an artifact.
+// CodeSpec describes the files in an artifact package.
 type CodeSpec struct {
-	Format string    `json:"format"`
-	Entry  string    `json:"entry"`
-	Stack  StackSpec `json:"stack"`
-}
-
-// StackSpec describes an authoring stack. It does not grant runtime access.
-type StackSpec struct {
-	Preset    string          `json:"preset,omitempty"`
-	Target    string          `json:"target,omitempty"`
-	Languages []string        `json:"languages,omitempty"`
-	Framework *TechnologySpec `json:"framework,omitempty"`
-	UIKit     *TechnologySpec `json:"uiKit,omitempty"`
-	Styling   *TechnologySpec `json:"styling,omitempty"`
-	Build     *BuildSpec      `json:"build,omitempty"`
-}
-
-// TechnologySpec identifies a framework, UI kit, or styling tool.
-type TechnologySpec struct {
-	ID      string `json:"id"`
-	Version string `json:"version,omitempty"`
-	Mode    string `json:"mode,omitempty"`
-}
-
-// BuildSpec describes the authoring build output without asking artifactd to run it.
-type BuildSpec struct {
-	Type    string `json:"type,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Version string `json:"version,omitempty"`
-	Output  string `json:"output,omitempty"`
+	Format string `json:"format"`
+	Entry  string `json:"entry"`
 }
 
 // RuntimeSpec identifies an allowlisted Artifactd runtime.

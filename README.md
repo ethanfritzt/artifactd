@@ -4,7 +4,7 @@
 
 ![Artifactd Home library](docs/images/artifactd-home.png)
 
-**Status: pre-alpha / workspace runtime implementation.** The repository contains the Go CLI, daemon, SQLite registry, immutable filesystem version store, workspace providers, artifact runtime data APIs, and optional React/Mantine authoring templates.
+**Status: pre-alpha / workspace runtime implementation.** The repository contains the Go CLI, daemon, SQLite registry, immutable filesystem version store, workspace providers, artifact runtime data APIs, and dependency-free static artifact authoring.
 
 ## Why artifactd?
 
@@ -41,11 +41,8 @@ CLI agent or human
         ▼
 artifact create --id artifact-id
         │
-        ▼
-Artifactd-managed source under ~/.local/share/artifactd/sources/
-        │
-        ▼
-artifact publish artifact-id
+        ├── editable source under ~/.local/share/artifactd/sources/
+        └── initial scaffold published automatically
         │
         ▼
 artifactd stores an immutable version
@@ -69,9 +66,8 @@ Current capabilities:
 
 - a small `artifact.json` manifest
 - standalone static artifacts
-- optional React + Vite + Mantine scaffolding via `artifact create --id <id> --template react`
-- opt-in Cytoscape graph scaffolding via `artifact create --id <id> --template react --feature graph`
-- `artifact create`, `publish`, `list`, `archive`, `unarchive`, `watch`, `live`, `unwatch`, `versions`, and `restore` (publish supports `--open` to launch the result)
+- dependency-free HTML, CSS, and JavaScript scaffolding via `artifact create --id <id>`
+- `artifact create`, `publish`, `list`, `archive`, `unarchive`, `watch`, `live`, `unwatch`, `versions`, and `restore` (`create` auto-publishes; `--open` launches the result)
 - Go `artifactd` daemon with JSON-over-Unix-socket IPC
 - SQLite-backed metadata registry
 - filesystem-backed immutable versions
@@ -90,7 +86,7 @@ The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node run
 - [MVP scope](docs/mvp.md) — milestones, acceptance criteria, and explicit non-goals
 - [Architecture](docs/architecture.md) — runtime boundaries and data flow
 - [Protocol](docs/protocol.md) — CLI-to-daemon API
-- [Artifact specification](docs/artifact-spec.md) — versioned artifact layers and stack metadata
+- [Artifact specification](docs/artifact-spec.md) — versioned artifact metadata and packaging
 - [Artifact format](docs/artifact-format.md) — manifest and packaging conventions
 - [Security model](docs/security.md) — threat model and constraints for generated content
 - [Agent integration](docs/agent-integration.md) — shell-first integration and future directions
@@ -99,7 +95,7 @@ The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node run
 - [Default artifact](default/) — the built-in library starter/template artifact
 - [Roadmap](docs/roadmap.md) — staged evolution beyond the MVP
 - [Development](docs/development.md) — build and test commands
-- [Artifact authoring](docs/authoring.md) — optional React, Mantine, and Cytoscape workflows
+- [Artifact authoring](docs/authoring.md) — raw HTML, CSS, and JavaScript workflows
 - [Contributing](CONTRIBUTING.md) — how to contribute while the project is still being shaped
 
 These documents describe the current pre-alpha API and implementation boundaries. Runtime providers are intentionally narrow while the core interaction is validated.
@@ -113,12 +109,11 @@ go build -o artifact ./cmd/artifact
 go build -o artifactd ./cmd/artifactd
 ```
 
-Start the daemon, create an artifact, publish it, and list it:
+Start the daemon, create an artifact, open its initial preview, and list it:
 
 ```bash
 ./artifactd &
-./artifact create --id demo
-./artifact publish demo --open
+./artifact create --id demo --open
 ./artifact list
 ```
 
@@ -127,21 +122,14 @@ Artifactd's managed data directory. Use `--path ./demo --id demo` when a
 repository-local source directory is intentional. Existing directory paths
 remain supported by `publish` and `watch`.
 
-For a React artifact, build the static output before publishing:
+Create publishes the generated static files immediately. Keep the preview current while editing with:
 
 ```bash
-source_dir="$(artifact create --id my-tool --template react)"
-cd "$source_dir"
-npm ci
-npm run build
-artifact publish my-tool
+source_dir="$(artifact create --id my-tool)"
+artifact watch my-tool
 ```
 
-Add Cytoscape only when the artifact needs a graph:
-
-```bash
-artifact create --id my-graph --template react --feature graph
-```
+The live preview refreshes after valid edits and shows a blurred loading overlay while a new snapshot is being assembled. Use `artifact publish my-tool` for an explicit durable checkpoint.
 
 Published artifacts are served at `http://<id>.artifacts.localhost:7337/`. The default Artifactd Home library is available at `http://artifacts.localhost:7337/`. Legacy path URLs remain available and redirect at the artifact root.
 

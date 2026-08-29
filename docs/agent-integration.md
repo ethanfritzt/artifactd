@@ -10,10 +10,10 @@ A generic agent instruction can be:
 When an interactive visual, calculator, dashboard, explorer, or reusable UI
 would be more useful than plain text:
 
-1. Create an Artifactd-managed source with `artifact create --id <id>`.
+1. Create an Artifactd-managed source with `artifact create --id <id>`; the initial scaffold is published automatically.
 2. Generate the artifact files in the returned source directory.
-3. Run `artifact publish <id> --open` when the user wants the result opened automatically.
-4. Return the artifact URL and a one-line summary.
+3. Run `artifact watch <id>` for a live preview while editing, or use `artifact create --open` when the user wants the initial URL opened automatically.
+4. Run `artifact publish <id>` for an explicit immutable checkpoint and return the artifact URL.
 
 Use `artifact create --path <directory> --id <id>` only when repository-local
 source is intentional.
@@ -37,7 +37,7 @@ An integration should encourage agents to:
 The repository includes two Agent Skills-compatible instruction packages:
 
 - [`skills/artifactd-cli/SKILL.md`](../skills/artifactd-cli/SKILL.md) for creating, building, and publishing artifacts through the public CLI
-- [`skills/artifactd-design/SKILL.md`](../skills/artifactd-design/SKILL.md) for contextual visual direction, Mantine implementation guidance, responsive composition, and reliability review
+- [`skills/artifactd-design/SKILL.md`](../skills/artifactd-design/SKILL.md) for contextual visual direction, responsive composition, accessibility, and reliability review
 
 They use public authoring and runtime interfaces and do not depend on internal daemon APIs.
 
@@ -78,17 +78,16 @@ The artifact reads that source from `/_artifactd/data/github`. MCP credentials a
 
 ## Live artifact editing
 
-After the first publish, Pi can keep the artifact open while editing its source directory:
+After `artifact create` has published the initial scaffold, Pi can keep the artifact open while editing its source directory:
 
 ```bash
-artifact publish demo
 artifact watch demo
 ```
 
 These commands resolve `demo` to the managed source directory. Existing source
 paths remain supported for artifacts created before managed sources were added.
 
-`artifact watch` starts an opt-in local live preview and prints the same stable URL. File changes are validated, copied into an atomic temporary snapshot, and cause the browser to refresh automatically. Invalid or incomplete edits leave the last valid preview available. A later `artifact publish` remains the explicit durable checkpoint and creates an immutable version; ordinary saves do not create versions.
+`artifact watch` starts an opt-in local live preview and prints the same stable URL. File changes are validated, copied into an atomic temporary snapshot, and cause the browser to refresh automatically. While a snapshot is being assembled, the existing page is blurred and covered by a loading indicator. Invalid or incomplete edits leave the last valid preview available. A later `artifact publish` remains the explicit durable checkpoint and creates an immutable version; ordinary saves do not create versions.
 
 Watch mode is intended for a foreground agent session and should be stopped with `Ctrl-C` or:
 
@@ -96,7 +95,7 @@ Watch mode is intended for a foreground agent session and should be stopped with
 artifact unwatch demo
 ```
 
-For React artifacts, watch the generated static output (or rebuild it through the authoring workflow) because artifactd does not run Node or build commands.
+Watch the raw source directory because artifactd serves static files directly and does not run build commands.
 
 ## Future agent actions
 

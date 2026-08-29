@@ -128,12 +128,11 @@ func findDefaultArtifact(cfg config.Config) string {
 	}
 	candidates := []string{
 		filepath.Join(cfg.DataDir, "default"),
-		filepath.Join(cfg.DataDir, "default", "dist"),
-		filepath.Join("default", "dist"),
+		filepath.Join("default"),
 	}
 	if executable, err := os.Executable(); err == nil {
 		executableDefault := filepath.Join(filepath.Dir(executable), "default")
-		candidates = append(candidates, filepath.Join(executableDefault, "dist"))
+		candidates = append(candidates, executableDefault)
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {

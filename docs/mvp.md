@@ -53,7 +53,7 @@ The Phase 1 MVP will not include:
 - permanent artifact deletion or purge commands
 - AI chat or agent orchestration
 - IDE or code editor
-- Node, React, Svelte, or other runtime dependencies inside the daemon or published artifact
+- Node or other runtime dependencies inside the daemon or published artifact
 - arbitrary backend processes
 - Docker-based runtime isolation
 - cloud hosting, accounts, or authentication
@@ -68,12 +68,13 @@ The Phase 1 MVP will not include:
 
 The MVP is ready for dogfooding when a user can:
 
-1. Run `artifact create --id demo`.
-2. Edit the generated static files in the returned managed source directory.
-3. Start `artifactd`.
-4. Run `artifact publish demo` and receive a URL.
-5. Optionally pass `--open` to launch the URL in the default browser.
-6. Run `artifact list` and see the published artifact.
+1. Start `artifactd`.
+2. Run `artifact create --id demo` and receive an automatically published scaffold.
+3. Edit the generated static files in the returned managed source directory.
+4. Optionally pass `--open` to launch the initial URL in the default browser.
+5. Run `artifact watch demo` to preview valid edits with a loading overlay during refresh.
+6. Run `artifact publish demo` for an explicit durable checkpoint.
+7. Run `artifact list` and see the published artifact.
 7. Publish a changed directory with the same ID and create a new version.
 8. Archive an artifact, confirm it is hidden from the active library, then unarchive it.
 9. Restart `artifactd` and retain the registry and published content.
