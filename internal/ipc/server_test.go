@@ -110,6 +110,92 @@ func TestPublishHandler(t *testing.T) {
 	}
 }
 
+func TestPublishWorkspaceAssociationRequiresMatchingSource(t *testing.T) {
+	t.Run("spoofed source path is not trusted", func(t *testing.T) {
+		root := t.TempDir()
+		store, err := storage.Open(filepath.Join(root, "data"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = store.Close() }()
+
+		workspaceRoot := filepath.Join(root, "workspace")
+		if err := os.Mkdir(workspaceRoot, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		claimedSource := filepath.Join(workspaceRoot, "claimed")
+		if err := create.Run(create.Options{Directory: claimedSource, ID: "demo", Name: "Claimed"}); err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := store.AddWorkspace(t.Context(), "trusted", workspaceRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uploadedSource := filepath.Join(root, "uploaded")
+		if err := create.Run(create.Options{Directory: uploadedSource, ID: "demo", Name: "Uploaded"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(uploadedSource, "app.js"), []byte("spoofed package"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+
+		body, contentType := multipartArtifactWithSource(t, uploadedSource, claimedSource)
+		request := httptest.NewRequest(http.MethodPost, "/v1/artifacts/publish", body)
+		request.Header.Set("Content-Type", contentType)
+		recorder := httptest.NewRecorder()
+		server := NewServer(store, func(id string) string { return "http://" + id }, nil, nil)
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		_, version, err := store.Current(t.Context(), "demo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version.WorkspaceID != "" {
+			t.Fatalf("spoofed source path associated workspace %q (workspace %q)", version.WorkspaceID, workspace.ID)
+		}
+	})
+
+	t.Run("matching source path is trusted", func(t *testing.T) {
+		root := t.TempDir()
+		store, err := storage.Open(filepath.Join(root, "data"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = store.Close() }()
+
+		workspaceRoot := filepath.Join(root, "workspace")
+		if err := os.Mkdir(workspaceRoot, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		source := filepath.Join(workspaceRoot, "demo")
+		if err := create.Run(create.Options{Directory: source, ID: "demo", Name: "Demo"}); err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := store.AddWorkspace(t.Context(), "trusted", workspaceRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, contentType := multipartArtifactWithSource(t, source, source)
+		request := httptest.NewRequest(http.MethodPost, "/v1/artifacts/publish", body)
+		request.Header.Set("Content-Type", contentType)
+		recorder := httptest.NewRecorder()
+		server := NewServer(store, func(id string) string { return "http://" + id }, nil, nil)
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusCreated {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		_, version, err := store.Current(t.Context(), "demo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version.WorkspaceID != workspace.ID {
+			t.Fatalf("matching source path workspace = %q, want %q", version.WorkspaceID, workspace.ID)
+		}
+	})
+}
+
 func TestArchiveHandler(t *testing.T) {
 	store, err := storage.Open(t.TempDir())
 	if err != nil {
@@ -205,9 +291,18 @@ func TestArchiveHandler(t *testing.T) {
 }
 
 func multipartArtifact(t *testing.T, source string) (io.Reader, string) {
+	return multipartArtifactWithSource(t, source, "")
+}
+
+func multipartArtifactWithSource(t *testing.T, source, sourcePath string) (io.Reader, string) {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	if sourcePath != "" {
+		if err := writer.WriteField("source_path", sourcePath); err != nil {
+			t.Fatal(err)
+		}
+	}
 	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err

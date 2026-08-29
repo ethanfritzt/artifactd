@@ -29,7 +29,7 @@ POST /v1/artifacts/publish
 Content-Type: multipart/form-data
 ```
 
-Each artifact file is sent in a `file` part. The `X-Artifact-Path` part header carries the normalized relative path, such as `artifact.json` or `assets/chart.svg`; the filename remains the basename for multipart compatibility. The CLI also sends an internal `source_path` field so the daemon can associate the version with the longest matching registered workspace root.
+Each artifact file is sent in a `file` part. The `X-Artifact-Path` part header carries the normalized relative path, such as `artifact.json` or `assets/chart.svg`; the filename remains the basename for multipart compatibility. The CLI also sends an internal `source_path` hint. The daemon associates a version with the longest matching registered workspace root only after resolving that directory and verifying that its complete file set and contents match the uploaded package. Missing, inaccessible, or mismatched hints publish without a workspace association; `source_path` is not trusted by itself.
 
 Successful response:
 
@@ -125,7 +125,7 @@ List workspaces:
 GET /v1/workspaces
 ```
 
-Workspace roots are canonical existing directories. The daemon matches published source paths to the most-specific registered root.
+Workspace roots are canonical existing directories. The daemon matches a verified published source directory to the most-specific registered root; a client-supplied `source_path` alone never grants a workspace association.
 
 ## Agent runtime data
 

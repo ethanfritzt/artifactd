@@ -19,7 +19,7 @@ Use `artifact create --path <directory> --id <id>` only when repository-local
 source is intentional.
 ```
 
-This keeps `artifactd` agent-agnostic. Pi, Codex, Claude Code, OpenCode, shell scripts, and humans can all use the same interface. A source directory under a registered workspace is associated automatically when published.
+This keeps `artifactd` agent-agnostic. Pi, Codex, Claude Code, OpenCode, shell scripts, and humans can all use the same interface. A source directory under a registered workspace is associated automatically when published if the daemon verifies that its complete file set and contents match the uploaded package; otherwise the publish remains unassociated.
 
 ## Expected agent behavior
 
