@@ -61,7 +61,7 @@ artifact publish demo --watch
 
 The artifact ID comes from `artifact.json`. New scaffolds are stored under Artifactd's managed `sources/<artifact-id>/` directory, outside the current repository. Use `--path` with `artifact create` when repository-local source is intentional. Watch mode is explicitly opt-in so the daemon does not unexpectedly retain paths, consume resources, or follow files after an agent exits.
 
-Pi needs no special editing protocol: it continues to modify files through its normal shell/editor tools. The shipped skill should teach Pi to start watch mode once, keep the URL open, and use ordinary edits for subsequent iterations.
+Pi needs no special editing protocol: it continues to modify files through its normal shell/editor tools. Agent integrations should teach Pi to start watch mode once, keep the URL open, and use ordinary edits for subsequent iterations.
 
 ## Architecture
 
@@ -201,7 +201,7 @@ Do not silently copy a restored version back into the agent's source workspace. 
 5. Make the browser server select a live snapshot when one is active.
 6. Add SSE subscriptions and browser reload notifications.
 7. Add CLI/client/protocol support for `artifact watch` and `artifact live`.
-8. Update the agent skill and authoring documentation with the edit loop.
+8. Update the agent integration and authoring documentation with the edit loop.
 
 ### Phase 2: Checkpoints and rollback
 

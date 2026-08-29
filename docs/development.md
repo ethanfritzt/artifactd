@@ -6,6 +6,12 @@ Build both native binaries:
 make build
 ```
 
+Validate the repository's raw static artifacts (there is no Node build step):
+
+```bash
+make web-build
+```
+
 Run the test suite and static checks:
 
 ```bash

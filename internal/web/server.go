@@ -195,6 +195,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -203,10 +204,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.serveArtifactHost(w, r, id)
 		return
 	}
-	s.serveLegacyPath(w, r)
+	if s.isLegacyHost(r.Host) {
+		s.serveLegacyPath(w, r)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id string) {
+	relative, err := normalizedRequestPath(r.URL.Path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	runtimePath := ""
+	if strings.HasPrefix(relative, "_artifactd/") {
+		runtimePath = strings.TrimPrefix(relative, "_artifactd/")
+	}
+	s.serveArtifact(w, r, id, relative, runtimePath)
+}
+
+// serveArtifact is shared by artifact-host and legacy-path routes so that both
+// routes select the same version, live snapshot, and response decoration.
+func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, id, relative, runtimePath string) {
 	artifact, version, err := s.store.Current(r.Context(), id)
 	if errors.Is(err, registry.ErrNotFound) {
 		http.NotFound(w, r)
@@ -216,10 +236,11 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/_artifactd/") {
-		s.serveRuntime(w, r, artifact.ID, version)
+	if runtimePath != "" {
+		s.serveRuntime(w, r, artifact.ID, version, runtimePath)
 		return
 	}
+
 	root := version.Path
 	entry := version.Entry
 	livePreview := false
@@ -231,8 +252,7 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 			livePreview = true
 		}
 	}
-	relative := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-	if relative == "." || relative == "" {
+	if relative == "" {
 		relative = entry
 	}
 	decorate := relative == entry && artifact.ID != s.defaultID
@@ -240,53 +260,45 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (s *Server) serveLegacyPath(w http.ResponseWriter, r *http.Request) {
-	requestPath := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
-	if requestPath == "" || requestPath == "." {
+	requestPath, err := normalizedRequestPath(r.URL.Path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if requestPath == "" {
 		if s.defaultID != "" {
-			if _, _, err := s.store.Current(r.Context(), s.defaultID); err == nil {
+			switch _, _, err := s.store.Current(r.Context(), s.defaultID); {
+			case err == nil:
 				http.Redirect(w, r, s.publicURL(s.defaultID), http.StatusMovedPermanently)
+				return
+			case errors.Is(err, registry.ErrNotFound):
+			default:
+				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
 		}
 		http.NotFound(w, r)
 		return
 	}
+
 	parts := strings.Split(requestPath, "/")
 	id := parts[0]
-	artifact, version, err := s.store.Current(r.Context(), id)
-	if errors.Is(err, registry.ErrNotFound) {
+	if !artifactHostID.MatchString(id) {
 		http.NotFound(w, r)
 		return
 	}
-	if err != nil {
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
 	if len(parts) == 1 && !strings.HasSuffix(r.URL.Path, "/") {
-		http.Redirect(w, r, s.publicURL(artifact.ID), http.StatusMovedPermanently)
+		http.Redirect(w, r, s.publicURL(id), http.StatusMovedPermanently)
 		return
 	}
-	root := version.Path
-	entry := version.Entry
-	livePreview := false
-	if s.live != nil {
-		if snapshot, release, ok := s.live.Snapshot(artifact.ID); ok {
-			defer release()
-			root = snapshot.Path
-			entry = snapshot.Entry
-			livePreview = true
-		}
-	}
-	relative := entry
+	relative := ""
 	if len(parts) > 1 {
 		relative = strings.Join(parts[1:], "/")
 	}
-	decorate := relative == entry && artifact.ID != s.defaultID
-	s.serveFile(w, r, root, relative, livePreview, decorate)
+	s.serveArtifact(w, r, id, relative, "")
 }
 
-func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID string, version model.Version) {
-	runtimePath := strings.TrimPrefix(r.URL.Path, "/_artifactd/")
+func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID string, version model.Version, runtimePath string) {
 	parts := strings.Split(runtimePath, "/")
 	if len(parts) == 1 && parts[0] == "live.js" {
 		s.serveLiveClient(w)
@@ -302,6 +314,23 @@ func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID
 	}
 	if len(parts) == 1 && parts[0] == "events" {
 		s.serveEvents(w, r, artifactID)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "live" {
+		if s.live == nil {
+			writeRuntimeError(w, http.StatusNotImplemented, "live preview is unavailable")
+			return
+		}
+		info, err := s.live.Info(artifactID)
+		if errors.Is(err, live.ErrNotWatching) {
+			writeRuntimeError(w, http.StatusNotFound, "live preview is not active")
+			return
+		}
+		if err != nil {
+			writeRuntimeError(w, http.StatusInternalServerError, "live preview is unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, info)
 		return
 	}
 	if len(parts) == 1 && parts[0] == "library" {
@@ -467,12 +496,23 @@ func (s *Server) serveFile(
 		http.NotFound(w, r)
 		return
 	}
+	info, err := os.Lstat(filePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
 	isHTML := strings.EqualFold(filepath.Ext(filePath), ".html")
 	if (livePreview || decorate) && isHTML {
 		s.serveHTML(w, r, filePath, livePreview, decorate)
 		return
 	}
-	http.ServeFile(w, r, filePath)
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer func() { _ = file.Close() }()
+	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), file)
 }
 
 func (s *Server) serveHTML(
@@ -482,8 +522,8 @@ func (s *Server) serveHTML(
 	livePreview,
 	decorate bool,
 ) {
-	info, err := os.Stat(filePath)
-	if err != nil {
+	info, err := os.Lstat(filePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		http.NotFound(w, r)
 		return
 	}
@@ -546,23 +586,66 @@ func injectBeforeBodyClose(content []byte, injected string) []byte {
 
 func (s *Server) artifactIDFromHost(host string) (string, bool) {
 	host = strings.TrimSuffix(hostName(host), ".")
-	base := strings.TrimSuffix(strings.ToLower(s.publicHost), ".")
+	base := strings.TrimSuffix(hostName(s.publicHost), ".")
+	if base == "" {
+		return "", false
+	}
 	suffix := "." + base
 	if !strings.HasSuffix(host, suffix) || len(host) <= len(suffix) {
 		return "", false
 	}
 	id := strings.TrimSuffix(host, suffix)
-	if !artifactHostID.MatchString(id) {
+	if len(id) > 63 || !artifactHostID.MatchString(id) {
 		return "", false
 	}
 	return id, true
 }
 
+func (s *Server) isLegacyHost(host string) bool {
+	configured := strings.TrimSuffix(hostName(s.publicHost), ".")
+	candidate := strings.TrimSuffix(hostName(host), ".")
+	if configured != "" && candidate == configured {
+		return true
+	}
+	if candidate == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(candidate)
+	return ip != nil && ip.IsLoopback()
+}
+
 func hostName(host string) string {
 	if name, _, err := net.SplitHostPort(host); err == nil {
-		return name
+		return strings.ToLower(name)
 	}
-	return host
+	return strings.ToLower(host)
+}
+
+func normalizedRequestPath(requestPath string) (string, error) {
+	if requestPath == "" {
+		requestPath = "/"
+	}
+	if !strings.HasPrefix(requestPath, "/") || strings.Contains(requestPath, "\x00") || strings.Contains(requestPath, "\\") {
+		return "", errors.New("invalid browser path")
+	}
+	clean := path.Clean(requestPath)
+	canonical := clean
+	if strings.HasSuffix(requestPath, "/") && clean != "/" {
+		canonical += "/"
+	}
+	if canonical != requestPath {
+		return "", errors.New("browser path must be normalized")
+	}
+	relative := strings.Trim(strings.TrimPrefix(requestPath, "/"), "/")
+	if relative == "" {
+		return "", nil
+	}
+	for _, segment := range strings.Split(relative, "/") {
+		if segment == "." || segment == ".." || segment == "" {
+			return "", errors.New("invalid browser path")
+		}
+	}
+	return relative, nil
 }
 
 func queryDepth(r *http.Request) (int, error) {
@@ -578,7 +661,7 @@ func queryDepth(r *http.Request) (int, error) {
 }
 
 func safeFilePath(root, relative string) (string, error) {
-	if relative == "" || strings.Contains(relative, "\\") || filepath.IsAbs(filepath.FromSlash(relative)) || !filepath.IsLocal(filepath.FromSlash(relative)) {
+	if relative == "" || strings.Contains(relative, "\x00") || strings.Contains(relative, "\\") || filepath.IsAbs(filepath.FromSlash(relative)) || !filepath.IsLocal(filepath.FromSlash(relative)) {
 		return "", fmt.Errorf("invalid artifact path")
 	}
 	clean := filepath.Clean(filepath.FromSlash(relative))
@@ -588,7 +671,42 @@ func safeFilePath(root, relative string) (string, error) {
 	if filepath.ToSlash(clean) != relative {
 		return "", fmt.Errorf("artifact path must be normalized")
 	}
-	return filepath.Join(root, clean), nil
+
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving artifact root: %w", err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return "", fmt.Errorf("reading artifact root: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return "", fmt.Errorf("artifact root is not a directory")
+	}
+	candidate := filepath.Join(root, clean)
+	resolvedRelative, err := filepath.Rel(root, candidate)
+	if err != nil || resolvedRelative == ".." || strings.HasPrefix(resolvedRelative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("artifact path escapes version")
+	}
+
+	// Published and live snapshots reject symlinks at copy time. Check again
+	// while serving so a damaged or externally modified snapshot cannot turn
+	// the browser route into a file read outside its version root.
+	current := root
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, statErr := os.Lstat(current)
+		if errors.Is(statErr, os.ErrNotExist) {
+			break
+		}
+		if statErr != nil {
+			return "", statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("artifact path contains a symlink")
+		}
+	}
+	return candidate, nil
 }
 
 func writeRuntimeError(w http.ResponseWriter, status int, message string) {
@@ -597,6 +715,7 @@ func writeRuntimeError(w http.ResponseWriter, status int, message string) {
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		slog.Error("writing browser JSON response", "error", err)
@@ -605,6 +724,8 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Vary", "Host")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")

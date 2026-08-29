@@ -25,7 +25,7 @@ CLI agents and humans
                                              watched source workspace
 ```
 
-There is no built-in library frontend. `artifact list` is a CLI operation, and the browser server serves published artifact files plus narrow runtime data endpoints.
+Artifactd Home is a small built-in static artifact that provides the browser library. The browser server serves it and other published artifact files plus narrow runtime data endpoints; `artifact list` remains available as a CLI operation.
 
 ## Go project structure
 
@@ -139,10 +139,11 @@ http://<id>.artifacts.localhost:7337/_artifactd/library
 http://<id>.artifacts.localhost:7337/_artifactd/system
 http://<id>.artifacts.localhost:7337/_artifactd/files
 http://<id>.artifacts.localhost:7337/_artifactd/data/<source>
+http://<id>.artifacts.localhost:7337/_artifactd/live
 http://<id>.artifacts.localhost:7337/_artifactd/events
 ```
 
-The legacy path form remains available for static content and redirects artifact roots to the artifact-specific origin.
+The legacy path form remains available for static content on the configured library host (and local loopback aliases) and redirects artifact roots to the artifact-specific origin. Browser paths are required to be normalized and are served only from validated, regular files inside the selected snapshot.
 
 ## Runtime boundary
 

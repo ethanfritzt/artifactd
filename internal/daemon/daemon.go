@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"artifactd/internal/live"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
+	"artifactd/internal/registry"
 	"artifactd/internal/runtime"
 	"artifactd/internal/storage"
 	"artifactd/internal/web"
@@ -48,12 +50,8 @@ func (d *Daemon) Close() error {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
-	if defaultArtifact := findDefaultArtifact(d.config); defaultArtifact != "" {
-		if err := d.store.EnsureDefault(ctx, defaultArtifact, defaultArtifactID); err != nil {
-			slog.Error("seeding default artifact", "error", err)
-		}
-	} else {
-		slog.Warn("default artifact source not found", "id", defaultArtifactID)
+	if err := d.ensureDefaultArtifact(ctx); err != nil {
+		return err
 	}
 
 	publicURL := func(id string) string {
@@ -61,7 +59,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	dataStore := runtime.NewStore()
 	liveManager := live.NewManager(d.store)
-	defer liveManager.Close()
+	liveClosed := false
+	closeLive := func() {
+		if !liveClosed {
+			liveManager.Close()
+			liveClosed = true
+		}
+	}
+	defer closeLive()
 	controlServer := &http.Server{
 		Handler:           ipc.NewServer(d.store, publicURL, dataStore, liveManager).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -114,12 +119,34 @@ func (d *Daemon) Run(ctx context.Context) error {
 	slog.Info("artifactd started", "socket", d.config.SocketPath, "address", browserServer.Addr)
 	select {
 	case <-ctx.Done():
+		closeLive()
 		d.shutdown(controlServer, browserServer)
 		return nil
 	case err := <-errs:
+		closeLive()
 		d.shutdown(controlServer, browserServer)
 		return err
 	}
+}
+
+func (d *Daemon) ensureDefaultArtifact(ctx context.Context) error {
+	_, _, err := d.store.Current(ctx, defaultArtifactID)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, registry.ErrNotFound) {
+		return fmt.Errorf("checking default artifact: %w", err)
+	}
+
+	defaultArtifact := findDefaultArtifact(d.config)
+	if defaultArtifact == "" {
+		slog.Warn("default artifact source not found", "id", defaultArtifactID)
+		return nil
+	}
+	if err := d.store.EnsureDefault(ctx, defaultArtifact, defaultArtifactID); err != nil {
+		return fmt.Errorf("seeding default artifact: %w", err)
+	}
+	return nil
 }
 
 func findDefaultArtifact(cfg config.Config) string {
@@ -131,11 +158,15 @@ func findDefaultArtifact(cfg config.Config) string {
 		filepath.Join("default"),
 	}
 	if executable, err := os.Executable(); err == nil {
-		executableDefault := filepath.Join(filepath.Dir(executable), "default")
-		candidates = append(candidates, executableDefault)
+		executableDir := filepath.Dir(executable)
+		candidates = append(candidates,
+			filepath.Join(executableDir, "default"),
+			filepath.Join(filepath.Dir(executableDir), "default"),
+		)
 	}
 	for _, candidate := range candidates {
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+		info, err := os.Lstat(candidate)
+		if err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			return candidate
 		}
 	}
@@ -145,12 +176,25 @@ func findDefaultArtifact(cfg config.Config) string {
 func (d *Daemon) shutdown(controlServer, browserServer *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := controlServer.Shutdown(ctx); err != nil {
-		slog.Error("shutting down control server", "error", err)
+
+	servers := []struct {
+		name   string
+		server *http.Server
+	}{
+		{name: "control", server: controlServer},
+		{name: "browser", server: browserServer},
 	}
-	if err := browserServer.Shutdown(ctx); err != nil {
-		slog.Error("shutting down browser server", "error", err)
+	var waitGroup sync.WaitGroup
+	waitGroup.Add(len(servers))
+	for _, item := range servers {
+		go func() {
+			defer waitGroup.Done()
+			if err := item.server.Shutdown(ctx); err != nil {
+				slog.Error("shutting down server", "server", item.name, "error", err)
+			}
+		}()
 	}
+	waitGroup.Wait()
 }
 
 func serveHTTP(name string, server *http.Server, listener net.Listener, errs chan<- error) {

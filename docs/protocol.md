@@ -153,9 +153,11 @@ GET /_artifactd/library
 GET /_artifactd/system
 GET /_artifactd/files?path=...&depth=...
 GET /_artifactd/data/{source}
+GET /_artifactd/live
+GET /_artifactd/events
 ```
 
-`/_artifactd/library` returns the current artifact metadata from SQLite. `/_artifactd/system` returns CPU, memory, load, and process data. `/_artifactd/files` returns metadata scoped to the artifact's registered workspace. The legacy path URL remains available for static content and redirects its artifact root to the artifact-specific origin.
+`/_artifactd/library` returns the current artifact metadata from SQLite. `/_artifactd/system` returns CPU, memory, load, and process data. `/_artifactd/files` returns metadata scoped to the artifact's registered workspace. `/_artifactd/live` returns the active live-preview status, and `/_artifactd/events` emits live-preview changes over Server-Sent Events. The legacy path URL remains available for static content and redirects its artifact root to the artifact-specific origin.
 
 ## Errors
 

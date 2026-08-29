@@ -90,8 +90,6 @@ The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node run
 - [Artifact format](docs/artifact-format.md) — manifest and packaging conventions
 - [Security model](docs/security.md) — threat model and constraints for generated content
 - [Agent integration](docs/agent-integration.md) — shell-first integration and future directions
-- [CLI skill](skills/artifactd-cli/SKILL.md) — instructions for agents using Artifactd
-- [Design skill](skills/artifactd-design/SKILL.md) — contextual visual design and reliability guidance
 - [Default artifact](default/) — the built-in library starter/template artifact
 - [Roadmap](docs/roadmap.md) — staged evolution beyond the MVP
 - [Development](docs/development.md) — build and test commands
@@ -153,9 +151,6 @@ Published artifacts are served at `http://<id>.artifacts.localhost:7337/`. The d
 ├── default/              # built-in Artifactd Home artifact
 ├── examples/
 │   └── top-lite/
-├── skills/
-│   ├── artifactd-cli/
-│   └── artifactd-design/
 ├── Makefile
 ├── go.mod
 └── go.sum

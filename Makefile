@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt lint install clean
+.PHONY: build web-build test vet fmt lint install clean
 
 VERSION ?= dev
 LDFLAGS := -X artifactd/internal/version.Value=$(VERSION)
@@ -7,6 +7,14 @@ build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/artifact ./cmd/artifact
 	go build -ldflags "$(LDFLAGS)" -o bin/artifactd ./cmd/artifactd
+
+# Static artifacts do not require a Node build. Keep this target as the
+# repository/CI validation hook for the files that are served directly.
+web-build:
+	@set -eu; for directory in default examples/top-lite; do \
+		test -s "$$directory/artifact.json"; \
+		test -s "$$directory/index.html"; \
+	done
 
 test:
 	go test ./...
