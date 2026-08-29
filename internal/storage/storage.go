@@ -339,12 +339,9 @@ func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (
 	}
 	workspaceID := ""
 	if sourcePath != "" {
-		workspace, workspaceErr := s.registry.WorkspaceForPath(ctx, sourcePath)
-		if workspaceErr != nil && !errors.Is(workspaceErr, registry.ErrWorkspaceNotFound) {
-			return registry.PublishResult{}, workspaceErr
-		}
-		if workspaceErr == nil {
-			workspaceID = workspace.ID
+		workspaceID, err = s.verifiedWorkspaceID(ctx, sourcePath, hash)
+		if err != nil {
+			return registry.PublishResult{}, err
 		}
 	}
 
@@ -378,6 +375,42 @@ func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (
 		return registry.PublishResult{}, err
 	}
 	return result, nil
+}
+
+// verifiedWorkspaceID treats sourcePath as an untrusted hint. A workspace is
+// associated only when the source directory resolves inside that workspace and
+// its complete file set and contents match the uploaded staging package.
+func (s *Store) verifiedWorkspaceID(ctx context.Context, sourcePath, stagedHash string) (string, error) {
+	resolvedSource, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		// source_path is optional provenance. A missing or unreadable hint must
+		// not prevent an otherwise valid publish, but it must never grant trust.
+		return "", nil
+	}
+	workspace, err := s.registry.WorkspaceForPath(ctx, resolvedSource)
+	if errors.Is(err, registry.ErrWorkspaceNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	sourceStaging, err := s.StageDirectory(resolvedSource)
+	if err != nil {
+		return "", nil
+	}
+	sourceHash, hashErr := contentHash(sourceStaging)
+	cleanupErr := s.RemoveStaging(sourceStaging)
+	if hashErr != nil {
+		return "", nil
+	}
+	if cleanupErr != nil {
+		return "", fmt.Errorf("cleaning workspace verification staging: %w", cleanupErr)
+	}
+	if sourceHash != stagedHash {
+		return "", nil
+	}
+	return workspace.ID, nil
 }
 
 func (s *Store) reconcileVersions() error {

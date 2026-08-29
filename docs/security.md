@@ -35,7 +35,7 @@ A static artifact can still make network requests permitted by the browser, incl
 
 ## Workspace and provider model
 
-Host access is scoped through trusted workspaces and daemon providers rather than repetitive per-artifact prompts. A workspace maps a stable name to a canonical local root, such as `vault → ~/vault`. A published artifact version records its workspace association.
+Host access is scoped through trusted workspaces and daemon providers rather than repetitive per-artifact prompts. A workspace maps a stable name to a canonical local root, such as `vault → ~/vault`. A published artifact version records its workspace association only after the daemon verifies that the uploaded package matches the source directory; a client-supplied path alone is not trusted.
 
 Read-only providers expose narrow data: system metrics, process summaries, and workspace file metadata. Pi can push structured data from CLI or MCP tools over the user-only Unix socket; credentials remain inside Pi. Artifact pages cannot invoke MCP, execute arbitrary commands, or access the control plane.
 
