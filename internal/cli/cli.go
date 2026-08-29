@@ -168,10 +168,6 @@ func createCommand(app *Application) *cobra.Command {
 	return command
 }
 
-func daemonUnavailable(err error) bool {
-	return ipc.IsDaemonUnavailable(err)
-}
-
 func listCommand(app *Application) *cobra.Command {
 	var includeArchived bool
 	command := &cobra.Command{
