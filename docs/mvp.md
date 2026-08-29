@@ -48,7 +48,7 @@ artifact unarchive <artifact-id>
 
 The Phase 1 MVP will not include:
 
-- library frontend
+- rich library UI, thumbnails, and search
 - thumbnails
 - permanent artifact deletion or purge commands
 - AI chat or agent orchestration
@@ -75,10 +75,10 @@ The MVP is ready for dogfooding when a user can:
 5. Run `artifact watch demo` to preview valid edits with a loading overlay during refresh.
 6. Run `artifact publish demo` for an explicit durable checkpoint.
 7. Run `artifact list` and see the published artifact.
-7. Publish a changed directory with the same ID and create a new version.
-8. Archive an artifact, confirm it is hidden from the active library, then unarchive it.
-9. Restart `artifactd` and retain the registry and published content.
-9. Confirm unsafe paths, symlinks, and special files are rejected.
+8. Publish a changed directory with the same ID and create a new version.
+9. Archive an artifact, confirm it is hidden from the active library, then unarchive it.
+10. Restart `artifactd` and retain the registry and published content.
+11. Confirm unsafe paths, symlinks, and special files are rejected.
 
 ## Deployment
 

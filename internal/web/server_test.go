@@ -44,6 +44,7 @@ func TestServerServesCurrentArtifact(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/demo/", nil)
+	request.Host = "artifacts.localhost"
 	server := newTestServer(store)
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -221,6 +222,33 @@ func TestServerRejectsUnknownArtifact(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	newTestServer(store).Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+}
+
+func TestNormalizedRequestPathRejectsTraversal(t *testing.T) {
+	for _, requestPath := range []string{"/demo/../secret", "/demo/./index.html", "/demo//index.html"} {
+		if _, err := normalizedRequestPath(requestPath); err == nil {
+			t.Errorf("normalizedRequestPath(%q) accepted unsafe path", requestPath)
+		}
+	}
+	if got, err := normalizedRequestPath("/demo/assets/app.js"); err != nil || got != "demo/assets/app.js" {
+		t.Fatalf("normalizedRequestPath() = %q, %v", got, err)
+	}
+}
+
+func TestServerRejectsUntrustedHost(t *testing.T) {
+	store, err := OpenTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	request := httptest.NewRequest(http.MethodGet, "/demo/", nil)
+	request.Host = "untrusted.example"
+	recorder := httptest.NewRecorder()
 	newTestServer(store).Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", recorder.Code)

@@ -27,9 +27,11 @@ The runtime should:
 - define symlink handling explicitly
 - keep artifact content separate from daemon and library control surfaces
 - use restrictive browser headers and a clear content security policy where practical
+- accept browser routes only for the configured library host or a validated artifact subdomain
+- reject non-canonical URL paths, traversal segments, symlinks, and directory listings when serving snapshots
 - document the trust model prominently
 
-A static artifact can still make network requests permitted by the browser, including requests to other local services. The exact origin and browser isolation strategy therefore require deliberate design.
+A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases; artifact-specific origins are validated from the configured host suffix. The exact origin and browser isolation strategy therefore require deliberate design.
 
 ## Workspace and provider model
 

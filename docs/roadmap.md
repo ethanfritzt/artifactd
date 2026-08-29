@@ -44,7 +44,7 @@ This roadmap is directional. The project should advance based on whether the cor
 
 ## Phase 4 — Agent integrations
 
-- Pi skill/instructions
+- agent integration guidance and examples
 - examples for other shell-capable agents
 - provenance fields where useful
 - predictable update behavior

@@ -32,26 +32,17 @@ An integration should encourage agents to:
 - report the resulting URL clearly
 - publish updates to the existing artifact instead of creating duplicates
 
-## Shipped skill
+## Agent guidance
 
-The repository includes two Agent Skills-compatible instruction packages:
-
-- [`skills/artifactd-cli/SKILL.md`](../skills/artifactd-cli/SKILL.md) for creating, building, and publishing artifacts through the public CLI
-- [`skills/artifactd-design/SKILL.md`](../skills/artifactd-design/SKILL.md) for contextual visual direction, responsive composition, accessibility, and reliability review
-
-They use public authoring and runtime interfaces and do not depend on internal daemon APIs.
-
-Once this repository is available as a package, an agent can install the skill with:
-
-```bash
-npx skills add <owner>/artifactd --skill artifactd-cli --skill artifactd-design --agent pi --copy
-```
-
-For local development, the file can be loaded directly from the `skills/artifactd-cli` directory.
+This repository documents the agent workflow but does not ship an installable
+Agent Skill package. Integrations should use the public CLI and the workflow
+above rather than relying on internal daemon APIs. The authoring and security
+documents provide the design, accessibility, and reliability guidance needed
+for generated artifacts.
 
 ## Pi integration
 
-The Pi integration should use the shipped skill or an equivalent instruction file. It should not need to call internal daemon APIs or depend on Pi-specific runtime behavior.
+A Pi integration should use this documented workflow or an equivalent instruction file. It should not need to call internal daemon APIs or depend on Pi-specific runtime behavior.
 
 An integration can open the returned URL automatically by passing `--open` to `artifact publish`. Other future conveniences may include:
 
