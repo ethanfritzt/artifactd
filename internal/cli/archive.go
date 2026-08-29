@@ -2,21 +2,19 @@ package cli
 
 import (
 	"fmt"
+	"io"
 
-	"artifactd/internal/config"
-	"artifactd/internal/ipc"
 	"artifactd/internal/protocol"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-func archiveCommand(v *viper.Viper, app *Application) *cobra.Command {
+func archiveCommand(app *Application) *cobra.Command {
 	return &cobra.Command{
 		Use:   "archive <artifact-id>",
 		Short: "Archive a published artifact",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			response, err := archiveArtifact(cmd, v, app, args[0])
+			response, err := archiveArtifact(cmd, app, args[0])
 			if err != nil {
 				return err
 			}
@@ -25,17 +23,17 @@ func archiveCommand(v *viper.Viper, app *Application) *cobra.Command {
 	}
 }
 
-func unarchiveCommand(v *viper.Viper, app *Application) *cobra.Command {
+func unarchiveCommand(app *Application) *cobra.Command {
 	return &cobra.Command{
 		Use:   "unarchive <artifact-id>",
 		Short: "Restore an archived artifact to the active library",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			client, err := app.client()
 			if err != nil {
 				return err
 			}
-			response, err := ipc.NewClient(cfg.SocketPath).Unarchive(cmd.Context(), args[0])
+			response, err := client.Unarchive(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -44,23 +42,19 @@ func unarchiveCommand(v *viper.Viper, app *Application) *cobra.Command {
 	}
 }
 
-func archiveArtifact(cmd *cobra.Command, v *viper.Viper, app *Application, artifactID string) (protocol.ArtifactResponse, error) {
-	cfg, err := config.Load(v, app.configFile)
+func archiveArtifact(cmd *cobra.Command, app *Application, artifactID string) (protocol.ArtifactResponse, error) {
+	client, err := app.client()
 	if err != nil {
 		return protocol.ArtifactResponse{}, err
 	}
-	return ipc.NewClient(cfg.SocketPath).Archive(cmd.Context(), artifactID)
+	return client.Archive(cmd.Context(), artifactID)
 }
 
 func writeArchiveResult(cmd *cobra.Command, response protocol.ArtifactResponse, output, action string) error {
-	if output == "json" {
-		return writeJSON(cmd, response)
-	}
-	if output != "table" {
-		return fmt.Errorf("unsupported output format %q", output)
-	}
-	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", response.Artifact.ID, action); err != nil {
-		return fmt.Errorf("writing archive result: %w", err)
-	}
-	return nil
+	return writeOutput(cmd, output, response, func(out io.Writer) error {
+		if _, err := fmt.Fprintf(out, "%s %s\n", response.Artifact.ID, action); err != nil {
+			return fmt.Errorf("writing archive result: %w", err)
+		}
+		return nil
+	})
 }

@@ -9,20 +9,18 @@ import (
 	"syscall"
 	"time"
 
-	"artifactd/internal/config"
 	"artifactd/internal/ipc"
 	"artifactd/internal/protocol"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-func watchCommand(v *viper.Viper, app *Application) *cobra.Command {
+func watchCommand(app *Application) *cobra.Command {
 	return &cobra.Command{
 		Use:   "watch <directory-or-id>",
 		Short: "Watch an artifact and refresh its live preview",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			cfg, err := app.loadConfig()
 			if err != nil {
 				return err
 			}
@@ -47,17 +45,17 @@ func watchCommand(v *viper.Viper, app *Application) *cobra.Command {
 	}
 }
 
-func unwatchCommand(v *viper.Viper, app *Application) *cobra.Command {
+func unwatchCommand(app *Application) *cobra.Command {
 	return &cobra.Command{
 		Use:   "unwatch <artifact-id>",
 		Short: "Stop an artifact live preview",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			client, err := app.client()
 			if err != nil {
 				return err
 			}
-			if err := ipc.NewClient(cfg.SocketPath).Unwatch(cmd.Context(), args[0]); err != nil {
+			if err := client.Unwatch(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			return nil
@@ -65,17 +63,17 @@ func unwatchCommand(v *viper.Viper, app *Application) *cobra.Command {
 	}
 }
 
-func liveCommand(v *viper.Viper, app *Application) *cobra.Command {
+func liveCommand(app *Application) *cobra.Command {
 	return &cobra.Command{
 		Use:   "live <artifact-id>",
 		Short: "Show an artifact live preview status",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			client, err := app.client()
 			if err != nil {
 				return err
 			}
-			response, err := ipc.NewClient(cfg.SocketPath).Live(cmd.Context(), args[0])
+			response, err := client.Live(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -132,35 +130,27 @@ func writeWatchMessage(cmd *cobra.Command, status, message string) {
 }
 
 func writeLiveStatus(cmd *cobra.Command, response protocol.LiveResponse, output string) error {
-	if output == "json" {
-		return writeJSON(cmd, response)
-	}
-	if output != "table" {
-		return fmt.Errorf("unsupported output format %q", output)
-	}
-	_, err := fmt.Fprintf(cmd.OutOrStdout(), "STATUS\tHASH\tDIRECTORY\n%s\t%s\t%s\n", response.Status, response.Hash, response.Directory)
-	if err != nil {
-		return fmt.Errorf("writing live status: %w", err)
-	}
-	if response.Error != "" {
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "ERROR\t%s\n", response.Error); err != nil {
-			return fmt.Errorf("writing live error: %w", err)
+	return writeOutput(cmd, output, response, func(out io.Writer) error {
+		if _, err := fmt.Fprintf(out, "STATUS\tHASH\tDIRECTORY\n%s\t%s\t%s\n", response.Status, response.Hash, response.Directory); err != nil {
+			return fmt.Errorf("writing live status: %w", err)
 		}
-	}
-	return nil
+		if response.Error != "" {
+			if _, err := fmt.Fprintf(out, "ERROR\t%s\n", response.Error); err != nil {
+				return fmt.Errorf("writing live error: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func writeLive(cmd *cobra.Command, response protocol.LiveResponse, output string) error {
-	if output == "json" {
-		return writeJSON(cmd, response)
-	}
-	if output != "table" {
-		return fmt.Errorf("unsupported output format %q", output)
-	}
-	if response.URL != "" {
-		if _, err := fmt.Fprintln(cmd.OutOrStdout(), response.URL); err != nil {
+	return writeOutput(cmd, output, response, func(out io.Writer) error {
+		if response.URL == "" {
+			return nil
+		}
+		if _, err := fmt.Fprintln(out, response.URL); err != nil {
 			return fmt.Errorf("writing live URL: %w", err)
 		}
-	}
-	return nil
+		return nil
+	})
 }

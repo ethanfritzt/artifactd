@@ -22,8 +22,9 @@ func TestCreateUsesManagedSourceByDefault(t *testing.T) {
 
 	command := NewCommand()
 	var output bytes.Buffer
+	var diagnostics bytes.Buffer
 	command.SetOut(&output)
-	command.SetErr(&output)
+	command.SetErr(&diagnostics)
 	command.SetArgs([]string{"--data-dir", dataDir, "create", "demo"})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
@@ -51,6 +52,7 @@ func TestCreateSupportsExplicitLocalPath(t *testing.T) {
 
 	command := NewCommand()
 	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{
 		"--data-dir", dataDir,
 		"create", "--path", localPath, "--id", "demo",

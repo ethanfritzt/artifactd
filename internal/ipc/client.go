@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -24,6 +25,43 @@ import (
 )
 
 const requestTimeout = 30 * time.Second
+
+var ErrDaemonUnavailable = errors.New("artifactd unavailable")
+
+// TransportError identifies a failure to communicate with artifactd. Its
+// wrapped error remains available to callers with errors.Is/errors.As.
+type TransportError struct {
+	Operation string
+	Err       error
+}
+
+func (e *TransportError) Error() string {
+	if e.Operation == "" {
+		return e.Err.Error()
+	}
+	return fmt.Sprintf("%s: %v", e.Operation, e.Err)
+}
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// IsDaemonUnavailable reports whether a request could not find or connect to
+// the local daemon, without relying on the platform-specific error text.
+func IsDaemonUnavailable(err error) bool {
+	return errors.Is(err, ErrDaemonUnavailable)
+}
+
+type DaemonError struct {
+	StatusCode int
+	Status     string
+	Message    string
+}
+
+func (e *DaemonError) Error() string {
+	if e.Message == "" {
+		return fmt.Sprintf("artifactd returned %s", e.Status)
+	}
+	return fmt.Sprintf("artifactd returned %s: %s", e.Status, e.Message)
+}
 
 type Client struct {
 	httpClient *http.Client
@@ -48,17 +86,20 @@ func dialUnixWithStartupRetry(ctx context.Context, socketPath string) (net.Conn,
 			return conn, nil
 		}
 		lastErr = err
-		if !errors.Is(err, syscall.ENOENT) && !errors.Is(err, syscall.ECONNREFUSED) {
-			return nil, err
+		if !isDaemonUnavailable(err) {
+			return nil, &TransportError{Operation: "connecting to artifactd", Err: err}
 		}
 		if time.Now().After(deadline) {
-			return nil, lastErr
+			return nil, &TransportError{
+				Operation: "connecting to artifactd",
+				Err:       errors.Join(ErrDaemonUnavailable, lastErr),
+			}
 		}
 		timer := time.NewTimer(25 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, &TransportError{Operation: "connecting to artifactd", Err: ctx.Err()}
 		case <-timer.C:
 		}
 	}
@@ -85,8 +126,11 @@ func (c *Client) List(ctx context.Context, includeArchived bool) ([]model.Artifa
 }
 
 func (c *Client) Archive(ctx context.Context, artifactID string) (protocol.ArtifactResponse, error) {
+	requestPath, err := artifactPath(artifactID, "/archive")
+	if err != nil {
+		return protocol.ArtifactResponse{}, err
+	}
 	var response protocol.ArtifactResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/archive"
 	if err := c.doJSON(ctx, http.MethodPost, requestPath, nil, &response); err != nil {
 		return protocol.ArtifactResponse{}, err
 	}
@@ -94,8 +138,11 @@ func (c *Client) Archive(ctx context.Context, artifactID string) (protocol.Artif
 }
 
 func (c *Client) Unarchive(ctx context.Context, artifactID string) (protocol.ArtifactResponse, error) {
+	requestPath, err := artifactPath(artifactID, "/archive")
+	if err != nil {
+		return protocol.ArtifactResponse{}, err
+	}
 	var response protocol.ArtifactResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/archive"
 	if err := c.doJSON(ctx, http.MethodDelete, requestPath, nil, &response); err != nil {
 		return protocol.ArtifactResponse{}, err
 	}
@@ -103,18 +150,29 @@ func (c *Client) Unarchive(ctx context.Context, artifactID string) (protocol.Art
 }
 
 func (c *Client) Publish(ctx context.Context, directory string) (protocol.PublishResponse, error) {
+	if directory == "" {
+		return protocol.PublishResponse{}, fmt.Errorf("artifact directory is required")
+	}
+	absoluteDirectory, err := filepath.Abs(directory)
+	if err != nil {
+		return protocol.PublishResponse{}, fmt.Errorf("resolving artifact directory: %w", err)
+	}
+	absoluteDirectory = filepath.Clean(absoluteDirectory)
+	if err := protocol.ValidateAbsolutePath(absoluteDirectory); err != nil {
+		return protocol.PublishResponse{}, err
+	}
+	if _, _, err := manifest.ValidateDirectory(absoluteDirectory); err != nil {
+		return protocol.PublishResponse{}, err
+	}
+
 	pipeReader, pipeWriter := io.Pipe()
 	multipartWriter := multipart.NewWriter(pipeWriter)
 	contentType := multipartWriter.FormDataContentType()
 	writerDone := make(chan error, 1)
 	go func() {
-		absoluteDirectory, absErr := filepath.Abs(directory)
-		if absErr == nil {
-			absErr = multipartWriter.WriteField("source_path", absoluteDirectory)
-		}
-		err := absErr
+		err := multipartWriter.WriteField("source_path", absoluteDirectory)
 		if err == nil {
-			err = writeMultipart(multipartWriter, directory)
+			err = writeMultipart(multipartWriter, absoluteDirectory)
 		}
 		if err == nil {
 			err = multipartWriter.Close()
@@ -156,17 +214,31 @@ func (c *Client) Publish(ctx context.Context, directory string) (protocol.Publis
 		return protocol.PublishResponse{}, writerErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return protocol.PublishResponse{}, decodeError(response.Body, response.Status)
+		return protocol.PublishResponse{}, decodeError(response.Body, response.Status, response.StatusCode)
 	}
 	var result protocol.PublishResponse
-	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+	if err := decodeResponse(response.Body, &result); err != nil {
 		return protocol.PublishResponse{}, fmt.Errorf("decoding publish response: %w", err)
 	}
 	return result, nil
 }
 
 func (c *Client) AddWorkspace(ctx context.Context, id, root string) (model.Workspace, error) {
-	body, err := json.Marshal(protocol.WorkspaceRequest{ID: id, Root: root})
+	if err := protocol.ValidateArtifactID(id); err != nil {
+		return model.Workspace{}, err
+	}
+	if root == "" {
+		return model.Workspace{}, fmt.Errorf("workspace root is required")
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return model.Workspace{}, fmt.Errorf("resolving workspace root: %w", err)
+	}
+	absoluteRoot = filepath.Clean(absoluteRoot)
+	if err := protocol.ValidateAbsolutePath(absoluteRoot); err != nil {
+		return model.Workspace{}, err
+	}
+	body, err := json.Marshal(protocol.WorkspaceRequest{ID: id, Root: absoluteRoot})
 	if err != nil {
 		return model.Workspace{}, fmt.Errorf("encoding workspace request: %w", err)
 	}
@@ -186,16 +258,30 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]model.Workspace, error) 
 }
 
 func (c *Client) Watch(ctx context.Context, directory string) (protocol.LiveResponse, error) {
-	body, err := json.Marshal(protocol.WatchRequest{Directory: directory})
+	if directory == "" {
+		return protocol.LiveResponse{}, fmt.Errorf("artifact directory is required")
+	}
+	absoluteDirectory, err := filepath.Abs(directory)
+	if err != nil {
+		return protocol.LiveResponse{}, fmt.Errorf("resolving artifact directory: %w", err)
+	}
+	absoluteDirectory = filepath.Clean(absoluteDirectory)
+	if err := protocol.ValidateAbsolutePath(absoluteDirectory); err != nil {
+		return protocol.LiveResponse{}, err
+	}
+	body, err := json.Marshal(protocol.WatchRequest{Directory: absoluteDirectory})
 	if err != nil {
 		return protocol.LiveResponse{}, fmt.Errorf("encoding watch request: %w", err)
 	}
 	var response protocol.LiveResponse
-	artifact, err := manifestFromDirectory(directory)
+	artifact, err := manifestFromDirectory(absoluteDirectory)
 	if err != nil {
 		return protocol.LiveResponse{}, err
 	}
-	requestPath := "/v1/artifacts/" + artifact + "/watch"
+	requestPath, err := artifactPath(artifact, "/watch")
+	if err != nil {
+		return protocol.LiveResponse{}, err
+	}
 	if err := c.doJSONWithContentType(ctx, http.MethodPost, requestPath, bytes.NewReader(body), "application/json", &response); err != nil {
 		return protocol.LiveResponse{}, err
 	}
@@ -203,13 +289,19 @@ func (c *Client) Watch(ctx context.Context, directory string) (protocol.LiveResp
 }
 
 func (c *Client) Unwatch(ctx context.Context, artifactID string) error {
-	requestPath := "/v1/artifacts/" + artifactID + "/watch"
+	requestPath, err := artifactPath(artifactID, "/watch")
+	if err != nil {
+		return err
+	}
 	return c.doJSON(ctx, http.MethodDelete, requestPath, nil, nil)
 }
 
 func (c *Client) Live(ctx context.Context, artifactID string) (protocol.LiveResponse, error) {
+	requestPath, err := artifactPath(artifactID, "/live")
+	if err != nil {
+		return protocol.LiveResponse{}, err
+	}
 	var response protocol.LiveResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/live"
 	if err := c.doJSON(ctx, http.MethodGet, requestPath, nil, &response); err != nil {
 		return protocol.LiveResponse{}, err
 	}
@@ -217,8 +309,11 @@ func (c *Client) Live(ctx context.Context, artifactID string) (protocol.LiveResp
 }
 
 func (c *Client) Versions(ctx context.Context, artifactID string) ([]model.Version, error) {
+	requestPath, err := artifactPath(artifactID, "/versions")
+	if err != nil {
+		return nil, err
+	}
 	var response protocol.VersionsResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/versions"
 	if err := c.doJSON(ctx, http.MethodGet, requestPath, nil, &response); err != nil {
 		return nil, err
 	}
@@ -226,12 +321,18 @@ func (c *Client) Versions(ctx context.Context, artifactID string) ([]model.Versi
 }
 
 func (c *Client) Restore(ctx context.Context, artifactID string, version int) (protocol.ArtifactResponse, error) {
+	if version < 1 {
+		return protocol.ArtifactResponse{}, fmt.Errorf("version must be a positive integer")
+	}
 	body, err := json.Marshal(protocol.RestoreRequest{Version: version})
 	if err != nil {
 		return protocol.ArtifactResponse{}, fmt.Errorf("encoding restore request: %w", err)
 	}
 	var response protocol.ArtifactResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/restore"
+	requestPath, err := artifactPath(artifactID, "/restore")
+	if err != nil {
+		return protocol.ArtifactResponse{}, err
+	}
 	if err := c.doJSONWithContentType(ctx, http.MethodPost, requestPath, bytes.NewReader(body), "application/json", &response); err != nil {
 		return protocol.ArtifactResponse{}, err
 	}
@@ -239,8 +340,23 @@ func (c *Client) Restore(ctx context.Context, artifactID string, version int) (p
 }
 
 func (c *Client) PushData(ctx context.Context, artifactID, source string, data []byte) (protocol.DataResponse, error) {
+	if err := protocol.ValidateArtifactID(artifactID); err != nil {
+		return protocol.DataResponse{}, err
+	}
+	if err := protocol.ValidateDataSource(source); err != nil {
+		return protocol.DataResponse{}, err
+	}
+	if len(data) > maxDataBody {
+		return protocol.DataResponse{}, fmt.Errorf("runtime data is too large")
+	}
+	if !json.Valid(data) {
+		return protocol.DataResponse{}, fmt.Errorf("data must be valid JSON")
+	}
+	requestPath, err := artifactPath(artifactID, "/data/"+url.PathEscape(source))
+	if err != nil {
+		return protocol.DataResponse{}, err
+	}
 	var response protocol.DataResponse
-	requestPath := "/v1/artifacts/" + artifactID + "/data/" + source
 	if err := c.doJSONWithContentType(ctx, http.MethodPost, requestPath, bytes.NewReader(data), "application/json", &response); err != nil {
 		return protocol.DataResponse{}, err
 	}
@@ -264,7 +380,7 @@ func (c *Client) doJSONWithContentType(ctx context.Context, method, path string,
 	req.Header.Set("Accept", "application/json")
 	response, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connecting to artifactd: %w", err)
+		return &TransportError{Operation: "requesting artifactd", Err: err}
 	}
 	defer func() {
 		if closeErr := response.Body.Close(); closeErr != nil {
@@ -272,15 +388,28 @@ func (c *Client) doJSONWithContentType(ctx context.Context, method, path string,
 		}
 	}()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return decodeError(response.Body, response.Status)
+		return decodeError(response.Body, response.Status, response.StatusCode)
 	}
 	if result == nil {
 		return nil
 	}
-	if err := json.NewDecoder(response.Body).Decode(result); err != nil {
+	if err := decodeResponse(response.Body, result); err != nil {
 		return fmt.Errorf("decoding daemon response: %w", err)
 	}
 	return nil
+}
+
+func artifactPath(artifactID, suffix string) (string, error) {
+	if err := protocol.ValidateArtifactID(artifactID); err != nil {
+		return "", err
+	}
+	return "/v1/artifacts/" + url.PathEscape(artifactID) + suffix, nil
+}
+
+func isDaemonUnavailable(err error) bool {
+	return errors.Is(err, syscall.ENOENT) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENOTSOCK)
 }
 
 func manifestFromDirectory(directory string) (string, error) {
@@ -313,12 +442,29 @@ func writeMultipart(writer *multipart.Writer, directory string) error {
 	})
 }
 
-func decodeError(body io.Reader, status string) error {
-	var response protocol.ErrorResponse
-	if err := json.NewDecoder(body).Decode(&response); err == nil && response.Error != "" {
-		return fmt.Errorf("daemon returned %s: %s", status, response.Error)
+func decodeResponse(body io.Reader, result any) error {
+	decoder := json.NewDecoder(body)
+	if err := decoder.Decode(result); err != nil {
+		return err
 	}
-	return fmt.Errorf("daemon returned %s", status)
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("response contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeError(body io.Reader, status string, statusCodes ...int) error {
+	var response protocol.ErrorResponse
+	_ = json.NewDecoder(body).Decode(&response)
+	statusCode := 0
+	if len(statusCodes) > 0 {
+		statusCode = statusCodes[0]
+	}
+	return &DaemonError{StatusCode: statusCode, Status: status, Message: response.Error}
 }
 
 func walkFiles(directory string, visit func(string, string) error) error {
@@ -339,6 +485,13 @@ func walkFiles(directory string, visit func(string, string) error) error {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("symlinks are not allowed: %s", path)
 		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("reading artifact file info: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("special files are not allowed: %s", path)
+		}
 		relative, err := filepath.Rel(directory, path)
 		if err != nil {
 			return fmt.Errorf("getting artifact path: %w", err)
@@ -348,6 +501,13 @@ func walkFiles(directory string, visit func(string, string) error) error {
 }
 
 func streamFile(writer io.Writer, path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("reading artifact file info: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("special files are not allowed: %s", path)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("opening artifact file: %w", err)
