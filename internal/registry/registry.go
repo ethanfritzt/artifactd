@@ -37,9 +37,31 @@ type PublishResult struct {
 	Version  model.Version
 }
 
-type InstallVersion func(version int, relativePath string) error
+// InstallVersion installs a version at relativePath before the registry
+// transaction commits. The returned cleanup function must remove that
+// installation when the transaction fails; it may be nil when nothing was
+// installed. This ordering keeps the database from committing a path that
+// does not exist, while cleanup closes the rollback side of the filesystem
+// transaction.
+type InstallVersion func(version int, relativePath string) (cleanup func() error, err error)
 
 func Open(path string) (*Registry, error) {
+	if path == "" {
+		return nil, errors.New("registry path is required")
+	}
+	if err := rejectSymlinkParents(path); err != nil {
+		return nil, err
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("registry path must not be a symlink")
+		}
+		if info.IsDir() {
+			return nil, errors.New("registry path is a directory")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("reading registry path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
@@ -82,6 +104,36 @@ func (r *Registry) Close() error {
 	return nil
 }
 
+func rejectSymlinkParents(path string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving registry path: %w", err)
+	}
+	root := filepath.VolumeName(absolute) + string(filepath.Separator)
+	relative, err := filepath.Rel(root, filepath.Dir(absolute))
+	if err != nil {
+		return fmt.Errorf("checking registry directory: %w", err)
+	}
+	current := root
+	if relative == "." {
+		return nil
+	}
+	for _, part := range strings.Split(relative, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, lstatErr := os.Lstat(current)
+		if errors.Is(lstatErr, os.ErrNotExist) {
+			return nil
+		}
+		if lstatErr != nil {
+			return fmt.Errorf("reading registry directory: %w", lstatErr)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("registry directory contains symlink: %s", current)
+		}
+	}
+	return nil
+}
+
 func configure(db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode = WAL",
@@ -97,12 +149,20 @@ func configure(db *sql.DB) error {
 	return nil
 }
 
-func migrate(db *sql.DB) error {
+func migrate(db *sql.DB) (err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("starting database migration: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				err = errors.Join(err, fmt.Errorf("rolling back database migration: %w", rollbackErr))
+			}
+		}
+	}()
+
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS schema_migrations (
-			version INTEGER PRIMARY KEY,
-			applied_at TEXT NOT NULL
-		) STRICT`,
 		`CREATE TABLE IF NOT EXISTS workspaces (
 			id TEXT PRIMARY KEY,
 			root TEXT NOT NULL UNIQUE,
@@ -139,20 +199,27 @@ func migrate(db *sql.DB) error {
 		) STRICT`,
 		`CREATE INDEX IF NOT EXISTS idx_version_workspaces_workspace
 			ON version_workspaces (workspace_id)`,
+		// schema_migrations was never consulted and could not describe a
+		// partially applied migration. Remove it as part of the one-time
+		// schema cleanup rather than retaining dead state.
+		`DROP TABLE IF EXISTS schema_migrations`,
 	}
 	for _, statement := range statements {
-		if _, err := db.Exec(statement); err != nil {
-			return fmt.Errorf("running database migration: %w", err)
+		if _, execErr := tx.Exec(statement); execErr != nil {
+			return fmt.Errorf("running database migration: %w", execErr)
 		}
 	}
-	if err := ensureArchivedAtColumn(db); err != nil {
+	if err := ensureArchivedAtColumn(tx); err != nil {
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing database migration: %w", err)
 	}
 	return nil
 }
 
-func ensureArchivedAtColumn(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(artifacts)")
+func ensureArchivedAtColumn(tx *sql.Tx) error {
+	rows, err := tx.Query("PRAGMA table_info(artifacts)")
 	if err != nil {
 		return fmt.Errorf("checking artifact schema: %w", err)
 	}
@@ -173,7 +240,7 @@ func ensureArchivedAtColumn(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("reading artifact schema: %w", err)
 	}
-	if _, err := db.Exec("ALTER TABLE artifacts ADD COLUMN archived_at TEXT"); err != nil {
+	if _, err := tx.Exec("ALTER TABLE artifacts ADD COLUMN archived_at TEXT"); err != nil {
 		return fmt.Errorf("adding artifact archive column: %w", err)
 	}
 	return nil
@@ -402,9 +469,23 @@ func (r *Registry) Publish(
 
 	versionNumber := currentVersion + 1
 	relativePath := filepath.ToSlash(filepath.Join("artifacts", m.ID, "versions", fmt.Sprint(versionNumber)))
-	if err := install(versionNumber, relativePath); err != nil {
-		return PublishResult{}, fmt.Errorf("installing artifact version: %w", err)
+	cleanup, installErr := install(versionNumber, relativePath)
+	if installErr != nil {
+		if cleanup != nil {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				installErr = errors.Join(installErr, fmt.Errorf("cleaning failed installation: %w", cleanupErr))
+			}
+		}
+		return PublishResult{}, fmt.Errorf("installing artifact version: %w", installErr)
 	}
+	defer func() {
+		if committed || cleanup == nil {
+			return
+		}
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleaning installed artifact version: %w", cleanupErr))
+		}
+	}()
 	if _, err := r.db.ExecContext(ctx, `
 		INSERT INTO versions (artifact_id, version, storage_path, manifest, content_hash, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
@@ -428,6 +509,17 @@ func (r *Registry) Publish(
 		return PublishResult{}, fmt.Errorf("updating artifact record: %w", err)
 	}
 	if _, err := r.db.ExecContext(ctx, "COMMIT"); err != nil {
+		// A COMMIT error can be ambiguous to SQLite clients. Do not remove
+		// the installed files if the version is already durable.
+		var recorded int
+		checkErr := r.db.QueryRowContext(context.Background(),
+			"SELECT 1 FROM versions WHERE artifact_id = ? AND version = ?", m.ID, versionNumber).
+			Scan(&recorded)
+		if checkErr == nil {
+			committed = true
+		} else if !errors.Is(checkErr, sql.ErrNoRows) {
+			err = errors.Join(err, fmt.Errorf("checking committed publish: %w", checkErr))
+		}
 		return PublishResult{}, fmt.Errorf("committing publish: %w", err)
 	}
 	committed = true
