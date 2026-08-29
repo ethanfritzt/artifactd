@@ -3,8 +3,11 @@ package registry
 import (
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+
+	"artifactd/internal/manifest"
 
 	_ "modernc.org/sqlite"
 )
@@ -12,6 +15,13 @@ import (
 func TestOpenMigratesExistingArtifactsTable(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "registry.db")
 	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	) STRICT`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +75,62 @@ func TestOpenMigratesExistingArtifactsTable(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if !found {
 		t.Fatal("archived_at column was not migrated")
+	}
+	var migrationTable string
+	if err := registry.db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").Scan(&migrationTable); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("dead schema_migrations table = %q, error = %v", migrationTable, err)
+	}
+}
+
+func TestPublishCleansInstalledFilesWhenDatabaseRollsBack(t *testing.T) {
+	registry, err := Open(filepath.Join(t.TempDir(), "registry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := registry.Close(); err != nil {
+			t.Logf("closing registry: %v", err)
+		}
+	}()
+	if _, err := registry.db.Exec(`CREATE TRIGGER reject_versions BEFORE INSERT ON versions BEGIN SELECT RAISE(ABORT, 'test rejection'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := filepath.Join(t.TempDir(), "installed")
+	cleaned := false
+	m := manifest.Manifest{
+		ArtifactVersion: 1,
+		ID:              "demo",
+		Name:            "Demo",
+		Entry:           "index.html",
+		Code:            manifest.CodeSpec{Format: "files", Entry: "index.html"},
+		Runtime:         manifest.RuntimeSpec{ID: manifest.DefaultRuntimeID, Version: manifest.CurrentRuntimeVersion},
+	}
+	_, err = registry.Publish(t.Context(), m, []byte(`{"artifactVersion":1}`), "hash", "", func(int, string) (func() error, error) {
+		if err := os.Mkdir(installed, 0o750); err != nil {
+			return nil, err
+		}
+		return func() error {
+			cleaned = true
+			return os.RemoveAll(installed)
+		}, nil
+	})
+	if err == nil {
+		t.Fatal("Publish() succeeded despite database rejection")
+	}
+	if !cleaned {
+		t.Fatal("Publish() did not clean the installed files")
+	}
+	if _, err := os.Stat(installed); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("installed files still exist: %v", err)
+	}
+	if _, _, err := registry.Current(t.Context(), "demo"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rolled-back artifact error = %v, want %v", err, ErrNotFound)
 	}
 }
 

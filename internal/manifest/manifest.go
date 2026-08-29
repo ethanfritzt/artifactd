@@ -314,16 +314,17 @@ func validateTree(dir string) error {
 		if files > MaxArtifactFiles {
 			return &ValidationError{Message: "artifact contains too many files"}
 		}
-		bytesTotal += info.Size()
-		if bytesTotal > MaxArtifactBytes {
+		size := info.Size()
+		if size < 0 || size > MaxArtifactBytes-bytesTotal {
 			return &ValidationError{Message: "artifact is too large"}
 		}
+		bytesTotal += size
 		return nil
 	})
 }
 
 func safeJoin(root, name string) (string, error) {
-	if filepath.IsAbs(name) || strings.Contains(name, "\\") || !filepath.IsLocal(filepath.FromSlash(name)) {
+	if name == "" || strings.ContainsRune(name, '\x00') || filepath.IsAbs(name) || strings.Contains(name, "\\") || !filepath.IsLocal(filepath.FromSlash(name)) {
 		return "", errors.New("path must be local and relative")
 	}
 	clean := filepath.Clean(filepath.FromSlash(name))

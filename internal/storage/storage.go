@@ -22,30 +22,48 @@ type Store struct {
 }
 
 func Open(root string) (*Store, error) {
+	root, err := canonicalRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureDirectory(root, root); err != nil {
+		return nil, fmt.Errorf("creating storage root: %w", err)
+	}
+
+	// Live snapshots and publish staging are disposable. Cleaning both on
+	// startup bounds abandoned data after a process crash. The managed-path
+	// checks make this cleanup safe even if the data directory was tampered
+	// with between runs.
 	liveRoot := filepath.Join(root, "live")
-	if err := os.RemoveAll(liveRoot); err != nil {
-		return nil, fmt.Errorf("cleaning live snapshots: %w", err)
+	stagingRoot := filepath.Join(root, "staging")
+	for _, dir := range []string{liveRoot, stagingRoot} {
+		if err := removeManagedDirectory(root, dir); err != nil {
+			return nil, fmt.Errorf("cleaning storage directory: %w", err)
+		}
 	}
 	for _, dir := range []string{
-		root,
 		filepath.Join(root, "sources"),
 		filepath.Join(root, "artifacts"),
-		filepath.Join(root, "staging"),
+		stagingRoot,
 		liveRoot,
 		filepath.Join(liveRoot, ".staging"),
 	} {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
+		if err := ensureDirectory(root, dir); err != nil {
 			return nil, fmt.Errorf("creating storage directory: %w", err)
-		}
-		if err := os.Chmod(dir, 0o750); err != nil {
-			return nil, fmt.Errorf("restricting storage directory permissions: %w", err)
 		}
 	}
 	reg, err := registry.Open(filepath.Join(root, "registry.db"))
 	if err != nil {
 		return nil, err
 	}
-	return &Store{root: root, registry: reg}, nil
+	store := &Store{root: root, registry: reg}
+	if err := store.reconcileVersions(); err != nil {
+		if closeErr := reg.Close(); closeErr != nil {
+			return nil, errors.Join(err, closeErr)
+		}
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *Store) Close() error {
@@ -81,6 +99,8 @@ func (s *Store) stageDirectory(source, stagingRoot string) (string, error) {
 			_ = s.RemoveStaging(staging)
 		}
 	}()
+	var files int
+	var bytesTotal int64
 	err = filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return fmt.Errorf("walking source directory: %w", walkErr)
@@ -103,7 +123,16 @@ func (s *Store) stageDirectory(source, stagingRoot string) (string, error) {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("special files are not allowed: %s", path)
 		}
-		if err := copyRegularFile(path, target); err != nil {
+		files++
+		if files > manifest.MaxArtifactFiles {
+			return fmt.Errorf("staging artifact: too many files (limit %d)", manifest.MaxArtifactFiles)
+		}
+		remaining := int64(manifest.MaxArtifactBytes) - bytesTotal
+		if info.Size() < 0 || info.Size() > remaining {
+			return fmt.Errorf("staging artifact: size exceeds %d bytes", manifest.MaxArtifactBytes)
+		}
+		bytesTotal += info.Size()
+		if err := copyRegularFile(path, target, remaining); err != nil {
 			return err
 		}
 		return nil
@@ -143,7 +172,7 @@ func (s *Store) EnsureDefault(ctx context.Context, source, expectedID string) er
 	return nil
 }
 
-func copyRegularFile(source, target string) error {
+func copyRegularFile(source, target string, limit int64) error {
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("creating staged directory: %w", err)
 	}
@@ -152,16 +181,27 @@ func copyRegularFile(source, target string) error {
 		return fmt.Errorf("opening source file: %w", err)
 	}
 	defer func() { _ = input.Close() }()
-	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if info, statErr := input.Stat(); statErr != nil {
+		return fmt.Errorf("reading source file: %w", statErr)
+	} else if !info.Mode().IsRegular() {
+		return fmt.Errorf("source file is not regular: %s", source)
+	}
+	output, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
 	if err != nil {
 		return fmt.Errorf("creating staged file: %w", err)
 	}
-	_, copyErr := io.Copy(output, input)
+	written, copyErr := io.Copy(output, io.LimitReader(input, limit+1))
 	closeErr := output.Close()
 	if copyErr != nil {
+		_ = os.Remove(target)
 		return fmt.Errorf("copying source file: %w", copyErr)
 	}
+	if written > limit {
+		_ = os.Remove(target)
+		return fmt.Errorf("source file exceeds staging limit of %d bytes", limit)
+	}
 	if closeErr != nil {
+		_ = os.Remove(target)
 		return fmt.Errorf("closing staged file: %w", closeErr)
 	}
 	return nil
@@ -199,9 +239,12 @@ func (s *Store) CommitLiveSnapshot(staging, artifactID string) (string, error) {
 	if !manifest.ValidID(artifactID) {
 		return "", fmt.Errorf("invalid live artifact ID")
 	}
+	if err := s.validateStagingPath(staging, filepath.Join(s.root, "live", ".staging")); err != nil {
+		return "", err
+	}
 	liveRoot := filepath.Join(s.root, "live")
 	snapshots := filepath.Join(liveRoot, artifactID, "snapshots")
-	if err := os.MkdirAll(snapshots, 0o750); err != nil {
+	if err := ensureDirectory(s.root, snapshots); err != nil {
 		return "", fmt.Errorf("creating live snapshot directory: %w", err)
 	}
 	finalPath, err := os.MkdirTemp(snapshots, "snapshot-")
@@ -224,11 +267,15 @@ func (s *Store) RemoveLiveSnapshot(snapshot string) error {
 		return fmt.Errorf("resolving live snapshot: %w", err)
 	}
 	relative, err := filepath.Rel(liveRoot, absolute)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+	if err != nil || relative == "." || relative == "" || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
 		return fmt.Errorf("live snapshot is outside storage")
 	}
-	if relative == "." || relative == "" {
-		return fmt.Errorf("cannot remove live snapshot root")
+	parts := strings.Split(filepath.ToSlash(relative), "/")
+	if len(parts) != 3 || !manifest.ValidID(parts[0]) || parts[1] != "snapshots" || !strings.HasPrefix(parts[2], "snapshot-") {
+		return fmt.Errorf("invalid live snapshot path")
+	}
+	if err := rejectSymlinkComponents(s.root, absolute); err != nil {
+		return err
 	}
 	if err := os.RemoveAll(absolute); err != nil {
 		return fmt.Errorf("removing live snapshot: %w", err)
@@ -261,13 +308,27 @@ func (s *Store) RemoveStaging(path string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.RemoveAll(path); err != nil {
-		return fmt.Errorf("removing staging directory: %w", err)
+	for _, root := range []string{
+		filepath.Join(s.root, "staging"),
+		filepath.Join(s.root, "live", ".staging"),
+	} {
+		if err := s.validateStagingPath(path, root); err == nil {
+			if err := rejectSymlinkComponents(s.root, path); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(path); err != nil {
+				return fmt.Errorf("removing staging directory: %w", err)
+			}
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("staging path is outside storage")
 }
 
 func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (registry.PublishResult, error) {
+	if err := s.validateStagingPath(staging, filepath.Join(s.root, "staging")); err != nil {
+		return registry.PublishResult{}, err
+	}
 	m, raw, err := manifest.ValidateDirectory(staging)
 	if err != nil {
 		return registry.PublishResult{}, err
@@ -287,23 +348,92 @@ func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (
 		}
 	}
 
-	result, err := s.registry.Publish(ctx, m, raw, hash, workspaceID, func(version int, relativePath string) error {
+	result, err := s.registry.Publish(ctx, m, raw, hash, workspaceID, func(version int, relativePath string) (func() error, error) {
 		finalPath, err := s.resolve(relativePath)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(finalPath), 0o750); err != nil {
-			return fmt.Errorf("creating version directory: %w", err)
+		if err := ensureDirectory(s.root, filepath.Dir(finalPath)); err != nil {
+			return nil, fmt.Errorf("creating version directory: %w", err)
+		}
+		if _, err := os.Lstat(finalPath); err == nil {
+			return nil, fmt.Errorf("version %d already exists", version)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("checking version %d path: %w", version, err)
 		}
 		if err := os.Rename(staging, finalPath); err != nil {
-			return fmt.Errorf("moving staged version %d: %w", version, err)
+			return nil, fmt.Errorf("moving staged version %d: %w", version, err)
 		}
-		return nil
+		return func() error {
+			if err := rejectSymlinkComponents(s.root, finalPath); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(finalPath); err != nil {
+				return fmt.Errorf("removing installed version: %w", err)
+			}
+			return nil
+		}, nil
 	})
 	if err != nil {
 		return registry.PublishResult{}, err
 	}
 	return result, nil
+}
+
+func (s *Store) reconcileVersions() error {
+	artifacts, err := s.registry.List(context.Background(), true)
+	if err != nil {
+		return fmt.Errorf("listing versions for storage reconciliation: %w", err)
+	}
+	expected := make(map[string]struct{})
+	for _, artifact := range artifacts {
+		versions, versionsErr := s.registry.ListVersions(context.Background(), artifact.ID)
+		if errors.Is(versionsErr, registry.ErrNotFound) && artifact.CurrentVersion == 0 {
+			continue
+		}
+		if versionsErr != nil {
+			return fmt.Errorf("listing versions for %s: %w", artifact.ID, versionsErr)
+		}
+		for _, version := range versions {
+			path, resolveErr := s.resolve(version.Path)
+			if resolveErr != nil {
+				return fmt.Errorf("resolving version %s/%d: %w", artifact.ID, version.Number, resolveErr)
+			}
+			expected[filepath.Clean(path)] = struct{}{}
+		}
+	}
+
+	artifactsRoot := filepath.Join(s.root, "artifacts")
+	err = filepath.WalkDir(artifactsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walking stored artifacts: %w", walkErr)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("stored artifacts contain symlink: %s", path)
+		}
+		if !entry.IsDir() || path == artifactsRoot {
+			return nil
+		}
+		relative, relErr := filepath.Rel(artifactsRoot, path)
+		if relErr != nil {
+			return fmt.Errorf("getting stored artifact path: %w", relErr)
+		}
+		parts := strings.Split(filepath.ToSlash(relative), "/")
+		if len(parts) != 3 || parts[1] != "versions" || !manifest.ValidID(parts[0]) {
+			return nil
+		}
+		if _, ok := expected[filepath.Clean(path)]; ok {
+			return filepath.SkipDir
+		}
+		if err := removeManagedDirectory(s.root, path); err != nil {
+			return fmt.Errorf("removing orphaned version: %w", err)
+		}
+		return filepath.SkipDir
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) List(ctx context.Context, includeArchived bool) ([]model.Artifact, error) {
@@ -380,22 +510,171 @@ func (s *Store) Current(ctx context.Context, id string) (model.Artifact, model.V
 }
 
 func (s *Store) resolve(relativePath string) (string, error) {
-	if filepath.IsAbs(relativePath) {
-		return "", fmt.Errorf("storage path must be relative")
+	if relativePath == "" || strings.ContainsRune(relativePath, '\x00') || filepath.IsAbs(relativePath) || strings.Contains(relativePath, "\\") {
+		return "", fmt.Errorf("storage path must be local and relative")
 	}
 	clean := filepath.Clean(filepath.FromSlash(relativePath))
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) || filepath.ToSlash(clean) != relativePath {
 		return "", fmt.Errorf("storage path escapes root")
 	}
 	path := filepath.Join(s.root, clean)
-	rel, err := filepath.Rel(s.root, path)
-	if err != nil {
-		return "", fmt.Errorf("checking storage path: %w", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("storage path escapes root")
+	if err := rejectSymlinkComponents(s.root, path); err != nil {
+		return "", err
 	}
 	return path, nil
+}
+
+func canonicalRoot(root string) (string, error) {
+	if root == "" {
+		return "", errors.New("storage root is required")
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving storage root: %w", err)
+	}
+	absolute = filepath.Clean(absolute)
+	if absolute == filepath.Dir(absolute) {
+		return "", errors.New("storage root must not be the filesystem root")
+	}
+	info, err := os.Lstat(absolute)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("storage root must not be a symlink")
+		}
+		if !info.IsDir() {
+			return "", errors.New("storage root is not a directory")
+		}
+		return filepath.EvalSymlinks(absolute)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("reading storage root: %w", err)
+	}
+	return absolute, nil
+}
+
+func ensureDirectory(root, path string) error {
+	if err := rejectSymlinkComponents(root, path); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(path, 0o750); err != nil {
+		return err
+	}
+	if err := rejectSymlinkComponents(root, path); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o750); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeManagedDirectory(root, path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("managed directory is not a directory: %s", path)
+	}
+	if err := rejectSymlinkComponents(root, path); err != nil {
+		return err
+	}
+	return os.RemoveAll(path)
+}
+
+func rejectSymlinkComponents(root, path string) error {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving storage root: %w", err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving storage path: %w", err)
+	}
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return fmt.Errorf("storage path escapes root")
+	}
+	current := root
+	if err := rejectSymlink(current); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		// A new storage root may not exist yet. Its missing descendants
+		// cannot contain a symlink, so checking the nearest existing parent
+		// is sufficient.
+		for {
+			parent := filepath.Dir(current)
+			if parent == current {
+				return nil
+			}
+			current = parent
+			if parentErr := rejectSymlink(current); parentErr == nil {
+				return nil
+			} else if !errors.Is(parentErr, os.ErrNotExist) {
+				return parentErr
+			}
+		}
+	}
+	if relative == "." {
+		return nil
+	}
+	for _, part := range strings.Split(relative, string(os.PathSeparator)) {
+		current = filepath.Join(current, part)
+		if err := rejectSymlink(current); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("storage path contains symlink: %s", path)
+	}
+	return nil
+}
+
+func (s *Store) validateStagingPath(path, root string) error {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving staging path: %w", err)
+	}
+	stagingRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("resolving staging root: %w", err)
+	}
+	relative, err := filepath.Rel(stagingRoot, absolute)
+	if err != nil || relative == "." || relative == "" || strings.Contains(relative, string(os.PathSeparator)) || filepath.IsAbs(relative) {
+		return fmt.Errorf("staging path is invalid")
+	}
+	if !strings.HasPrefix(filepath.Base(relative), "publish-") {
+		return fmt.Errorf("staging path is invalid")
+	}
+	if err := rejectSymlinkComponents(s.root, absolute); err != nil {
+		return err
+	}
+	info, err := os.Lstat(absolute)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading staging path: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("staging path is not a directory")
+	}
+	return nil
 }
 
 func contentHash(root string) (string, error) {
@@ -404,8 +683,18 @@ func contentHash(root string) (string, error) {
 		if err != nil {
 			return fmt.Errorf("walking staged artifact: %w", err)
 		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("symlinks are not allowed: %s", path)
+		}
 		if entry.IsDir() {
 			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("reading staged file info: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("special files are not allowed: %s", path)
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {

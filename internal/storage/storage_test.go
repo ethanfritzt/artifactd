@@ -2,12 +2,14 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"artifactd/internal/create"
+	"artifactd/internal/manifest"
 	"artifactd/internal/model"
 	"artifactd/internal/registry"
 )
@@ -66,6 +68,162 @@ func TestPublishStagedCreatesImmutableVersions(t *testing.T) {
 	}
 	if string(oldContent) == string(content) {
 		t.Fatal("version 1 was mutated")
+	}
+}
+
+func TestStageDirectoryEnforcesFileAndByteLimits(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	t.Run("file count", func(t *testing.T) {
+		source := t.TempDir()
+		for i := 0; i <= manifest.MaxArtifactFiles; i++ {
+			if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("file-%d", i)), []byte("x"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := store.StageDirectory(source); err == nil {
+			t.Fatal("StageDirectory() accepted too many files")
+		}
+		assertNoStagingDirectories(t, store.root)
+	})
+
+	t.Run("byte size", func(t *testing.T) {
+		source := t.TempDir()
+		file := filepath.Join(source, "large.bin")
+		if err := os.WriteFile(file, []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(file, manifest.MaxArtifactBytes+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.StageDirectory(source); err == nil {
+			t.Fatal("StageDirectory() accepted an oversized artifact")
+		}
+		assertNoStagingDirectories(t, store.root)
+	})
+}
+
+func TestOpenRemovesOrphanedVersionDirectory(t *testing.T) {
+	root := t.TempDir()
+	orphan := filepath.Join(root, "artifacts", "demo", "versions", "99")
+	if err := os.MkdirAll(orphan, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "partial"), []byte("incomplete"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned version remains: %v", err)
+	}
+}
+
+func TestOpenRemovesAbandonedStaging(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, "staging", "publish-old")
+	if err := os.MkdirAll(stale, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "partial"), []byte("incomplete"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	assertNoStagingDirectories(t, root)
+}
+
+func TestOpenRejectsSymlinkRoot(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := Open(link); err == nil {
+		t.Fatal("Open() accepted a symlink storage root")
+	}
+	if _, err := os.Stat(filepath.Join(target, "registry.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("symlink target was modified: %v", err)
+	}
+}
+
+func TestRemoveStagingRejectsPathsOutsideStorage(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	outside := filepath.Join(t.TempDir(), "do-not-delete")
+	if err := os.WriteFile(outside, []byte("sentinel"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveStaging(outside); err == nil {
+		t.Fatal("RemoveStaging() accepted an outside path")
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside path was changed: %v", err)
+	}
+}
+
+func TestRemoveLiveSnapshotRejectsSymlinkComponents(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	outside := t.TempDir()
+	snapshot := filepath.Join(outside, "snapshots", "snapshot-1")
+	if err := os.MkdirAll(snapshot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(store.root, "live", "demo")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := store.RemoveLiveSnapshot(filepath.Join(store.root, "live", "demo", "snapshots", "snapshot-1")); err == nil {
+		t.Fatal("RemoveLiveSnapshot() accepted a symlink component")
+	}
+	if _, err := os.Stat(snapshot); err != nil {
+		t.Fatalf("outside snapshot was changed: %v", err)
+	}
+}
+
+func TestResolveRejectsSymlinkComponents(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(store.root, "artifacts", "alias")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := store.resolve("artifacts/alias/file"); err == nil {
+		t.Fatal("resolve() accepted a symlink component")
+	}
+}
+
+func assertNoStagingDirectories(t *testing.T, root string) {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(root, "staging"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("staging directories remain: %+v", entries)
 	}
 }
 
