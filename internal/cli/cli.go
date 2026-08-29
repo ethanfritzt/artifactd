@@ -3,9 +3,9 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/tabwriter"
 
 	"artifactd/internal/config"
@@ -18,19 +18,58 @@ import (
 )
 
 type Application struct {
+	v          *viper.Viper
 	configFile string
 	output     string
 }
 
+func (a *Application) loadConfig() (config.Config, error) {
+	return config.Load(a.v, a.configFile)
+}
+
+func (a *Application) client() (*ipc.Client, error) {
+	cfg, err := a.loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	return ipc.NewClient(cfg.SocketPath), nil
+}
+
+type tableOutput func(io.Writer) error
+
+func writeJSON(cmd *cobra.Command, value any) error {
+	if err := json.NewEncoder(cmd.OutOrStdout()).Encode(value); err != nil {
+		return fmt.Errorf("writing JSON output: %w", err)
+	}
+	return nil
+}
+
+func writeOutput(cmd *cobra.Command, output string, value any, table tableOutput) error {
+	switch output {
+	case "json":
+		return writeJSON(cmd, value)
+	case "table":
+		return table(cmd.OutOrStdout())
+	default:
+		return fmt.Errorf("unsupported output format %q", output)
+	}
+}
+
 func NewCommand() *cobra.Command {
 	v := config.NewViper()
-	app := &Application{}
+	app := &Application{v: v}
 	root := &cobra.Command{
 		Use:           "artifact",
 		Short:         "Create and publish local artifacts",
 		Version:       version.Value,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			if app.output != "table" && app.output != "json" {
+				return fmt.Errorf("unsupported output format %q", app.output)
+			}
+			return nil
+		},
 	}
 	root.PersistentFlags().StringVar(&app.configFile, "config", "", "config file")
 	root.PersistentFlags().StringVar(&app.output, "output", "table", "output format: table or json")
@@ -38,23 +77,23 @@ func NewCommand() *cobra.Command {
 		panic(err)
 	}
 	root.AddCommand(
-		createCommand(v, app),
-		listCommand(v, app),
-		publishCommand(v, app),
-		workspaceCommand(v, app),
-		dataCommand(v, app),
-		watchCommand(v, app),
-		unwatchCommand(v, app),
-		liveCommand(v, app),
-		versionsCommand(v, app),
-		restoreCommand(v, app),
-		archiveCommand(v, app),
-		unarchiveCommand(v, app),
+		createCommand(app),
+		listCommand(app),
+		publishCommand(app),
+		workspaceCommand(app),
+		dataCommand(app),
+		watchCommand(app),
+		unwatchCommand(app),
+		liveCommand(app),
+		versionsCommand(app),
+		restoreCommand(app),
+		archiveCommand(app),
+		unarchiveCommand(app),
 	)
 	return root
 }
 
-func createCommand(v *viper.Viper, app *Application) *cobra.Command {
+func createCommand(app *Application) *cobra.Command {
 	var id, path, name, description string
 	var force, open bool
 	command := &cobra.Command{
@@ -62,7 +101,7 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 		Short: "Create and publish a standalone artifact scaffold",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			cfg, err := app.loadConfig()
 			if err != nil {
 				return err
 			}
@@ -95,21 +134,24 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 			}); err != nil {
 				return err
 			}
+			publishedURL := ""
 			if result, publishErr := ipc.NewClient(cfg.SocketPath).Publish(cmd.Context(), directory); publishErr == nil {
-				if cmd.OutOrStdout() != cmd.ErrOrStderr() {
-					if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "published: %s\n", result.URL); err != nil {
-						return fmt.Errorf("writing publish result: %w", err)
-					}
+				publishedURL = result.URL
+				if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "published: %s\n", result.URL); err != nil {
+					return fmt.Errorf("writing publish result: %w", err)
 				}
 				if open {
 					if err := openBrowser(cmd.Context(), result.URL); err != nil {
 						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open artifact in browser: %v\n", err)
 					}
 				}
-			} else if !daemonUnavailable(publishErr) {
+			} else if !ipc.IsDaemonUnavailable(publishErr) {
 				return fmt.Errorf("auto-publishing artifact: %w", publishErr)
-			} else if cmd.OutOrStdout() != cmd.ErrOrStderr() {
+			} else {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: artifactd is unavailable; scaffold was not published\n")
+			}
+			if app.output == "json" {
+				return writeJSON(cmd, map[string]any{"directory": filepath.Clean(directory), "published": publishedURL != "", "url": publishedURL})
 			}
 			if _, err := fmt.Fprintln(cmd.OutOrStdout(), filepath.Clean(directory)); err != nil {
 				return fmt.Errorf("writing create result: %w", err)
@@ -127,23 +169,21 @@ func createCommand(v *viper.Viper, app *Application) *cobra.Command {
 }
 
 func daemonUnavailable(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "connecting to artifactd") &&
-		(strings.Contains(message, "dial unix") || strings.Contains(message, "connection refused") || strings.Contains(message, "no such file"))
+	return ipc.IsDaemonUnavailable(err)
 }
 
-func listCommand(v *viper.Viper, app *Application) *cobra.Command {
+func listCommand(app *Application) *cobra.Command {
 	var includeArchived bool
 	command := &cobra.Command{
 		Use:   "list",
 		Short: "List published artifacts",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			client, err := app.client()
 			if err != nil {
 				return err
 			}
-			artifacts, err := ipc.NewClient(cfg.SocketPath).List(cmd.Context(), includeArchived)
+			artifacts, err := client.List(cmd.Context(), includeArchived)
 			if err != nil {
 				return err
 			}
@@ -154,14 +194,14 @@ func listCommand(v *viper.Viper, app *Application) *cobra.Command {
 	return command
 }
 
-func publishCommand(v *viper.Viper, app *Application) *cobra.Command {
+func publishCommand(app *Application) *cobra.Command {
 	var open bool
 	command := &cobra.Command{
 		Use:   "publish <directory-or-id>",
 		Short: "Publish an artifact to artifactd",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(v, app.configFile)
+			cfg, err := app.loadConfig()
 			if err != nil {
 				return err
 			}
@@ -189,11 +229,8 @@ func publishCommand(v *viper.Viper, app *Application) *cobra.Command {
 }
 
 func writeList(cmd *cobra.Command, artifacts []model.Artifact, output string) error {
-	switch output {
-	case "json":
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(artifacts)
-	case "table":
-		writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	return writeOutput(cmd, output, artifacts, func(out io.Writer) error {
+		writer := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		if _, err := fmt.Fprintln(writer, "ID\tNAME\tVERSION\tSTATUS\tUPDATED"); err != nil {
 			return fmt.Errorf("writing list header: %w", err)
 		}
@@ -207,7 +244,5 @@ func writeList(cmd *cobra.Command, artifacts []model.Artifact, output string) er
 			}
 		}
 		return writer.Flush()
-	default:
-		return fmt.Errorf("unsupported output format %q", output)
-	}
+	})
 }

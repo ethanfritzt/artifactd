@@ -88,6 +88,14 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) artifactRoute(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/artifacts/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusBadRequest, "invalid artifact ID")
+		return
+	}
+	if err := protocol.ValidateArtifactID(parts[0]); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch {
 	case len(parts) == 3 && parts[1] == "data":
 		s.pushData(w, r, parts[0], parts[2])
@@ -107,15 +115,19 @@ func (s *Server) artifactRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) watch(w http.ResponseWriter, r *http.Request, artifactID string) {
-	if s.live == nil {
-		writeError(w, http.StatusNotImplemented, "live preview is unavailable")
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	switch r.Method {
 	case http.MethodPost:
 		var request protocol.WatchRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&request); err != nil {
+		if err := decodeJSON(r, w, 16<<10, &request); err != nil || protocol.ValidateAbsolutePath(request.Directory) != nil {
 			writeError(w, http.StatusBadRequest, "invalid watch request")
+			return
+		}
+		if s.live == nil {
+			writeError(w, http.StatusNotImplemented, "live preview is unavailable")
 			return
 		}
 		info, err := s.live.Start(r.Context(), request.Directory)
@@ -147,6 +159,10 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request, artifactID string
 			URL:        s.publicURL(info.ArtifactID),
 		})
 	case http.MethodDelete:
+		if s.live == nil {
+			writeError(w, http.StatusNotImplemented, "live preview is unavailable")
+			return
+		}
 		if err := s.live.Stop(artifactID); err != nil {
 			status := http.StatusNotFound
 			if !errors.Is(err, live.ErrNotWatching) {
@@ -156,18 +172,16 @@ func (s *Server) watch(w http.ResponseWriter, r *http.Request, artifactID string
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
 func (s *Server) archive(w http.ResponseWriter, r *http.Request, artifactID string) {
-	if artifactID == model.SystemArtifactID {
-		writeError(w, http.StatusBadRequest, "system artifact cannot be archived")
-		return
-	}
 	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if artifactID == model.SystemArtifactID {
+		writeError(w, http.StatusBadRequest, "system artifact cannot be archived")
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -264,7 +278,7 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, artifactID stri
 		return
 	}
 	var request protocol.RestoreRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&request); err != nil {
+	if err := decodeJSON(r, w, 16<<10, &request); err != nil || request.Version < 1 {
 		writeError(w, http.StatusBadRequest, "invalid restore request")
 		return
 	}
@@ -305,7 +319,7 @@ func (s *Server) workspaces(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, protocol.WorkspacesResponse{Workspaces: workspaces})
 	case http.MethodPost:
 		var request protocol.WorkspaceRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&request); err != nil {
+		if err := decodeJSON(r, w, 16<<10, &request); err != nil || protocol.ValidateArtifactID(request.ID) != nil || protocol.ValidateAbsolutePath(request.Root) != nil {
 			writeError(w, http.StatusBadRequest, "invalid workspace request")
 			return
 		}
@@ -321,6 +335,10 @@ func (s *Server) workspaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pushData(w http.ResponseWriter, r *http.Request, artifactID, source string) {
+	if err := protocol.ValidateDataSource(source); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -354,13 +372,13 @@ func (s *Server) pushData(w http.ResponseWriter, r *http.Request, artifactID, so
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	id := strings.TrimPrefix(r.URL.Path, "/v1/artifacts/")
+	if protocol.ValidateArtifactID(id) != nil {
+		writeError(w, http.StatusBadRequest, "invalid artifact ID")
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/v1/artifacts/")
-	if id == "" || strings.Contains(id, "/") {
-		writeError(w, http.StatusBadRequest, "invalid artifact ID")
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	artifact, version, err := s.store.Current(r.Context(), id)
@@ -453,10 +471,9 @@ func receiveMultipart(r *http.Request, staging string) (string, error) {
 				return "", &RequestError{Message: "source path is too long"}
 			}
 			sourcePath = strings.TrimSpace(string(value))
-			if sourcePath == "" || strings.ContainsRune(sourcePath, '\x00') || !filepath.IsAbs(sourcePath) {
-				return "", &RequestError{Message: "source path must be absolute"}
+			if err := protocol.ValidateAbsolutePath(sourcePath); err != nil {
+				return "", &RequestError{Message: "source path must be absolute and normalized"}
 			}
-			sourcePath = filepath.Clean(sourcePath)
 		case "file":
 			name := part.Header.Get("X-Artifact-Path")
 			if name == "" {
@@ -498,12 +515,15 @@ func receiveMultipart(r *http.Request, staging string) (string, error) {
 }
 
 func safeUploadName(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '\x00') || strings.Contains(name, "\\") {
+		return "", errors.New("invalid artifact path")
+	}
 	name = filepath.ToSlash(name)
-	if name == "" || strings.Contains(name, "\\") {
+	if name == "" {
 		return "", errors.New("invalid artifact path")
 	}
 	clean := pathClean(name)
-	if name != clean || filepath.IsAbs(filepath.FromSlash(name)) || !filepath.IsLocal(filepath.FromSlash(name)) {
+	if clean == "." || clean == ".." || name != clean || filepath.IsAbs(filepath.FromSlash(name)) || !filepath.IsLocal(filepath.FromSlash(name)) {
 		return "", errors.New("invalid artifact path")
 	}
 	return name, nil
@@ -511,6 +531,22 @@ func safeUploadName(name string) (string, error) {
 
 func pathClean(name string) string {
 	return filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
+}
+
+func decodeJSON(r *http.Request, w http.ResponseWriter, limit int64, value any) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request contains multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

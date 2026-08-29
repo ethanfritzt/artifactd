@@ -5,24 +5,21 @@ import (
 	"io"
 	"os"
 
-	"artifactd/internal/config"
-	"artifactd/internal/ipc"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 const maxRuntimeData = 5 << 20
 
-func dataCommand(v *viper.Viper, app *Application) *cobra.Command {
+func dataCommand(app *Application) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "data",
 		Short: "Manage live artifact data",
 	}
-	command.AddCommand(dataPushCommand(v, app))
+	command.AddCommand(dataPushCommand(app))
 	return command
 }
 
-func dataPushCommand(v *viper.Viper, app *Application) *cobra.Command {
+func dataPushCommand(app *Application) *cobra.Command {
 	var filePath string
 	command := &cobra.Command{
 		Use:   "push <artifact-id> <source>",
@@ -33,25 +30,20 @@ func dataPushCommand(v *viper.Viper, app *Application) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, err := config.Load(v, app.configFile)
+			client, err := app.client()
 			if err != nil {
 				return err
 			}
-			response, err := ipc.NewClient(cfg.SocketPath).PushData(cmd.Context(), args[0], args[1], data)
+			response, err := client.PushData(cmd.Context(), args[0], args[1], data)
 			if err != nil {
 				return err
 			}
-			if app.output == "json" {
-				return writeJSON(cmd, response)
-			}
-			if app.output != "table" {
-				return fmt.Errorf("unsupported output format %q", app.output)
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s/%s updated at %s\n", response.ArtifactID, response.Source, response.UpdatedAt.Format("2006-01-02 15:04:05"))
-			if err != nil {
-				return fmt.Errorf("writing data result: %w", err)
-			}
-			return nil
+			return writeOutput(cmd, app.output, response, func(out io.Writer) error {
+				if _, err := fmt.Fprintf(out, "%s/%s updated at %s\n", response.ArtifactID, response.Source, response.UpdatedAt.Format("2006-01-02 15:04:05")); err != nil {
+					return fmt.Errorf("writing data result: %w", err)
+				}
+				return nil
+			})
 		},
 	}
 	command.Flags().StringVar(&filePath, "file", "-", "JSON file to push, or - for stdin")
