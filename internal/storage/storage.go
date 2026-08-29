@@ -16,6 +16,8 @@ import (
 	"artifactd/internal/registry"
 )
 
+var errWorkspaceHintUnverified = errors.New("workspace source hint could not be verified")
+
 type Store struct {
 	root     string
 	registry *registry.Registry
@@ -340,6 +342,9 @@ func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (
 	workspaceID := ""
 	if sourcePath != "" {
 		workspaceID, err = s.verifiedWorkspaceID(ctx, sourcePath, hash)
+		if errors.Is(err, errWorkspaceHintUnverified) {
+			err = nil
+		}
 		if err != nil {
 			return registry.PublishResult{}, err
 		}
@@ -385,11 +390,11 @@ func (s *Store) verifiedWorkspaceID(ctx context.Context, sourcePath, stagedHash 
 	if err != nil {
 		// source_path is optional provenance. A missing or unreadable hint must
 		// not prevent an otherwise valid publish, but it must never grant trust.
-		return "", nil
+		return "", errWorkspaceHintUnverified
 	}
 	workspace, err := s.registry.WorkspaceForPath(ctx, resolvedSource)
 	if errors.Is(err, registry.ErrWorkspaceNotFound) {
-		return "", nil
+		return "", errWorkspaceHintUnverified
 	}
 	if err != nil {
 		return "", err
@@ -397,18 +402,18 @@ func (s *Store) verifiedWorkspaceID(ctx context.Context, sourcePath, stagedHash 
 
 	sourceStaging, err := s.StageDirectory(resolvedSource)
 	if err != nil {
-		return "", nil
+		return "", errWorkspaceHintUnverified
 	}
 	sourceHash, hashErr := contentHash(sourceStaging)
 	cleanupErr := s.RemoveStaging(sourceStaging)
 	if hashErr != nil {
-		return "", nil
+		return "", errWorkspaceHintUnverified
 	}
 	if cleanupErr != nil {
 		return "", fmt.Errorf("cleaning workspace verification staging: %w", cleanupErr)
 	}
 	if sourceHash != stagedHash {
-		return "", nil
+		return "", errWorkspaceHintUnverified
 	}
 	return workspace.ID, nil
 }
