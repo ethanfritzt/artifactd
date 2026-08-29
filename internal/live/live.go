@@ -27,10 +27,12 @@ const (
 )
 
 var (
-	ErrAlreadyWatching = errors.New("artifact is already being watched")
-	ErrNotWatching     = errors.New("artifact is not being watched")
-	ErrTooManyClients  = errors.New("too many live event subscribers")
-	ErrTooManySessions = errors.New("too many live preview sessions")
+	ErrAlreadyWatching  = errors.New("artifact is already being watched")
+	ErrNotWatching      = errors.New("artifact is not being watched")
+	ErrTooManyClients   = errors.New("too many live event subscribers")
+	ErrTooManySessions  = errors.New("too many live preview sessions")
+	ErrArchivedArtifact = errors.New("archived artifacts cannot be watched")
+	ErrManagerClosed    = errors.New("live manager is closed")
 )
 
 type Status string
@@ -64,13 +66,17 @@ type Event struct {
 }
 
 type Manager struct {
-	store       *storage.Store
-	context     context.Context
-	cancel      context.CancelFunc
-	mu          sync.RWMutex
-	sessions    map[string]*session
-	starting    map[string]bool
-	subscribers map[string]map[chan Event]struct{}
+	store           *storage.Store
+	context         context.Context
+	cancel          context.CancelFunc
+	mu              sync.RWMutex
+	sessions        map[string]*session
+	starting        map[string]bool
+	startingCount   int
+	subscribers     map[string]map[chan Event]struct{}
+	subscriberCount int
+	starts          sync.WaitGroup
+	closed          bool
 }
 
 type session struct {
@@ -82,6 +88,7 @@ type session struct {
 	snapshot   Snapshot
 	info       Info
 	lastSeen   time.Time
+	stopping   bool
 }
 
 func NewManager(store *storage.Store) *Manager {
@@ -100,6 +107,25 @@ func (m *Manager) Start(ctx context.Context, directory string) (Info, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Info{}, ErrManagerClosed
+	}
+	if len(m.sessions)+m.startingCount >= maxSessions {
+		m.mu.Unlock()
+		return Info{}, ErrTooManySessions
+	}
+	m.startingCount++
+	m.starts.Add(1)
+	m.mu.Unlock()
+	defer m.starts.Done()
+	defer func() {
+		m.mu.Lock()
+		m.startingCount--
+		m.mu.Unlock()
+	}()
+
 	source, err := canonicalDirectory(directory)
 	if err != nil {
 		return Info{}, err
@@ -108,11 +134,22 @@ func (m *Manager) Start(ctx context.Context, directory string) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	if _, _, err := m.store.Current(ctx, manifestValue.ID); err != nil {
+	artifact, _, err := m.store.Current(ctx, manifestValue.ID)
+	if err != nil {
 		return Info{}, fmt.Errorf("checking published artifact: %w", err)
+	}
+	if artifact.ArchivedAt != nil {
+		return Info{}, fmt.Errorf("%w: %s", ErrArchivedArtifact, manifestValue.ID)
+	}
+	if err := ctx.Err(); err != nil {
+		return Info{}, err
 	}
 
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return Info{}, ErrManagerClosed
+	}
 	if m.starting[manifestValue.ID] || m.sessions[manifestValue.ID] != nil {
 		m.mu.Unlock()
 		return Info{}, ErrAlreadyWatching
@@ -130,27 +167,41 @@ func (m *Manager) Start(ctx context.Context, directory string) (Info, error) {
 	}()
 
 	sessionContext, cancel := context.WithCancel(m.context)
-	path, currentManifest, hash, err := m.createSnapshotWithRetry(source)
+	startupContext, startupCancel := context.WithCancel(sessionContext)
+	stopCaller := context.AfterFunc(ctx, startupCancel)
+	defer func() {
+		stopCaller()
+		startupCancel()
+	}()
+	path, currentManifest, hash, err := m.createSnapshotWithRetry(startupContext, source)
 	if err != nil {
 		cancel()
 		return Info{}, err
 	}
 	if currentManifest.ID != manifestValue.ID {
-		_ = m.store.RemoveLiveSnapshot(path)
+		cleanupErr := m.store.RemoveLiveSnapshot(path)
 		cancel()
+		if cleanupErr != nil {
+			return Info{}, errors.Join(fmt.Errorf("artifact ID changed while starting watch"), cleanupErr)
+		}
 		return Info{}, fmt.Errorf("artifact ID changed while starting watch")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		_ = m.store.RemoveLiveSnapshot(path)
+		cleanupErr := m.store.RemoveLiveSnapshot(path)
 		cancel()
+		if cleanupErr != nil {
+			return Info{}, errors.Join(fmt.Errorf("creating artifact watcher: %w", err), cleanupErr)
+		}
 		return Info{}, fmt.Errorf("creating artifact watcher: %w", err)
 	}
 	if err := addDirectories(watcher, source); err != nil {
-		_ = watcher.Close()
-		_ = m.store.RemoveLiveSnapshot(path)
+		cleanupErr := m.cleanupStartup(watcher, path)
 		cancel()
+		if cleanupErr != nil {
+			return Info{}, errors.Join(err, cleanupErr)
+		}
 		return Info{}, err
 	}
 
@@ -173,21 +224,40 @@ func (m *Manager) Start(ctx context.Context, directory string) (Info, error) {
 		lastSeen: time.Now(),
 	}
 	m.mu.Lock()
+	if m.closed || sessionContext.Err() != nil || startupContext.Err() != nil {
+		managerClosed := m.closed || sessionContext.Err() != nil
+		m.mu.Unlock()
+		cleanupErr := m.cleanupStartup(watcher, path)
+		cancel()
+		startupErr := startupContext.Err()
+		if managerClosed {
+			if cleanupErr != nil {
+				return Info{}, errors.Join(ErrManagerClosed, cleanupErr)
+			}
+			return Info{}, ErrManagerClosed
+		}
+		if cleanupErr != nil {
+			return Info{}, errors.Join(startupErr, cleanupErr)
+		}
+		return Info{}, startupErr
+	}
 	m.sessions[s.artifactID] = s
+	m.broadcastLocked(Event{Type: "artifact_changed", ArtifactID: s.artifactID, Hash: hash})
 	m.mu.Unlock()
-	m.broadcast(Event{Type: "artifact_changed", ArtifactID: s.artifactID, Hash: hash})
 	go m.run(s, watcher)
 	return s.info, nil
 }
 
 func (m *Manager) Stop(artifactID string) error {
-	m.mu.RLock()
+	m.mu.Lock()
 	s := m.sessions[artifactID]
-	m.mu.RUnlock()
 	if s == nil {
+		m.mu.Unlock()
 		return ErrNotWatching
 	}
+	s.stopping = true
 	s.cancel()
+	m.mu.Unlock()
 	<-s.done
 	return nil
 }
@@ -218,16 +288,21 @@ func (m *Manager) Snapshot(artifactID string) (Snapshot, func(), bool) {
 func (m *Manager) Subscribe(artifactID string) (<-chan Event, func(), error) {
 	channel := make(chan Event, 8)
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, nil, ErrManagerClosed
+	}
 	listeners := m.subscribers[artifactID]
+	if len(listeners) >= maxSubscribers || m.subscriberCount >= maxSubscribers {
+		m.mu.Unlock()
+		return nil, nil, ErrTooManyClients
+	}
 	if listeners == nil {
 		listeners = make(map[chan Event]struct{})
 		m.subscribers[artifactID] = listeners
 	}
-	if len(listeners) >= maxSubscribers {
-		m.mu.Unlock()
-		return nil, nil, ErrTooManyClients
-	}
 	listeners[channel] = struct{}{}
+	m.subscriberCount++
 	m.mu.Unlock()
 
 	unsubscribe := func() {
@@ -235,6 +310,7 @@ func (m *Manager) Subscribe(artifactID string) (<-chan Event, func(), error) {
 		if listeners, ok := m.subscribers[artifactID]; ok {
 			if _, exists := listeners[channel]; exists {
 				delete(listeners, channel)
+				m.subscriberCount--
 				close(channel)
 			}
 			if len(listeners) == 0 {
@@ -247,19 +323,24 @@ func (m *Manager) Subscribe(artifactID string) (<-chan Event, func(), error) {
 }
 
 func (m *Manager) Close() {
-	m.cancel()
-	m.mu.RLock()
+	m.mu.Lock()
+	m.closed = true
 	sessions := make([]*session, 0, len(m.sessions))
 	for _, s := range m.sessions {
+		s.stopping = true
+		s.cancel()
 		sessions = append(sessions, s)
 	}
-	m.mu.RUnlock()
-	for _, s := range sessions {
-		s.cancel()
-	}
+	m.mu.Unlock()
+
+	m.cancel()
 	for _, s := range sessions {
 		<-s.done
 	}
+	// A start reserves its slot before doing filesystem work. Wait for those
+	// starts as well, so none can install a session after Close returns.
+	m.starts.Wait()
+
 	m.mu.Lock()
 	for artifactID, listeners := range m.subscribers {
 		for channel := range listeners {
@@ -267,6 +348,7 @@ func (m *Manager) Close() {
 		}
 		delete(m.subscribers, artifactID)
 	}
+	m.subscriberCount = 0
 	m.mu.Unlock()
 }
 
@@ -277,16 +359,20 @@ func (m *Manager) run(s *session, watcher *fsnotify.Watcher) {
 		}
 		m.mu.Lock()
 		removed := false
+		snapshotPath := s.snapshot.Path
 		if current := m.sessions[s.artifactID]; current == s {
 			delete(m.sessions, s.artifactID)
-			_ = m.store.RemoveLiveSnapshot(s.snapshot.Path)
+			s.stopping = true
 			removed = true
 		}
-		close(s.done)
 		m.mu.Unlock()
+		if err := m.store.RemoveLiveSnapshot(snapshotPath); err != nil {
+			slog.Error("removing live snapshot", "artifact_id", s.artifactID, "path", snapshotPath, "error", err)
+		}
 		if removed {
 			m.broadcast(Event{Type: "artifact_changed", ArtifactID: s.artifactID})
 		}
+		close(s.done)
 	}()
 
 	var timer *time.Timer
@@ -343,8 +429,8 @@ func (m *Manager) run(s *session, watcher *fsnotify.Watcher) {
 			timerChannel = nil
 			m.refresh(s)
 		case <-leaseTicker.C:
-			if m.leaseExpired(s) {
-				s.cancel()
+			if m.leaseExpired(s) || m.artifactArchived(s) {
+				m.stopSession(s)
 				return
 			}
 		}
@@ -354,7 +440,24 @@ func (m *Manager) run(s *session, watcher *fsnotify.Watcher) {
 func (m *Manager) leaseExpired(s *session) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.sessions[s.artifactID] == s && time.Since(s.lastSeen) > watchLeaseTimeout
+	return m.sessions[s.artifactID] == s && !s.stopping && time.Since(s.lastSeen) > watchLeaseTimeout
+}
+
+func (m *Manager) stopSession(s *session) {
+	m.mu.Lock()
+	if m.sessions[s.artifactID] == s {
+		s.stopping = true
+		s.cancel()
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) artifactArchived(s *session) bool {
+	if s.context.Err() != nil {
+		return false
+	}
+	artifact, _, err := m.store.Current(s.context, s.artifactID)
+	return err == nil && artifact.ArchivedAt != nil
 }
 
 func (s *session) doneContext() <-chan struct{} {
@@ -362,21 +465,40 @@ func (s *session) doneContext() <-chan struct{} {
 }
 
 func (m *Manager) refresh(s *session) {
-	m.setStatus(s, StatusBuilding, "")
-	path, currentManifest, hash, err := m.createSnapshotWithRetry(s.directory)
+	if m.artifactArchived(s) {
+		m.stopSession(s)
+		return
+	}
+	if !m.setStatus(s, StatusBuilding, "") {
+		return
+	}
+	path, currentManifest, hash, err := m.createSnapshotWithRetry(s.context, s.directory)
 	if err != nil {
-		m.setError(s, err.Error())
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			m.setError(s, err.Error())
+		}
 		return
 	}
 	if currentManifest.ID != s.artifactID {
-		_ = m.store.RemoveLiveSnapshot(path)
+		if cleanupErr := m.store.RemoveLiveSnapshot(path); cleanupErr != nil {
+			slog.Error("removing rejected live snapshot", "artifact_id", s.artifactID, "path", path, "error", cleanupErr)
+		}
 		m.setError(s, "artifact ID changed while watching")
 		return
 	}
+	if err := s.context.Err(); err != nil {
+		if cleanupErr := m.store.RemoveLiveSnapshot(path); cleanupErr != nil {
+			slog.Error("removing canceled live snapshot", "artifact_id", s.artifactID, "path", path, "error", cleanupErr)
+		}
+		return
+	}
+
 	m.mu.Lock()
-	if m.sessions[s.artifactID] != s {
+	if m.sessions[s.artifactID] != s || s.stopping || m.closed {
 		m.mu.Unlock()
-		_ = m.store.RemoveLiveSnapshot(path)
+		if cleanupErr := m.store.RemoveLiveSnapshot(path); cleanupErr != nil {
+			slog.Error("removing stale live snapshot", "artifact_id", s.artifactID, "path", path, "error", cleanupErr)
+		}
 		return
 	}
 	oldPath := s.snapshot.Path
@@ -384,28 +506,42 @@ func (m *Manager) refresh(s *session) {
 	s.info.Status = StatusReady
 	s.info.Hash = hash
 	s.info.Error = ""
-	_ = m.store.RemoveLiveSnapshot(oldPath)
+	m.broadcastLocked(Event{Type: "artifact_changed", ArtifactID: s.artifactID, Hash: hash})
 	m.mu.Unlock()
-	m.broadcast(Event{Type: "artifact_changed", ArtifactID: s.artifactID, Hash: hash})
+	if cleanupErr := m.store.RemoveLiveSnapshot(oldPath); cleanupErr != nil {
+		slog.Error("removing previous live snapshot", "artifact_id", s.artifactID, "path", oldPath, "error", cleanupErr)
+	}
 }
 
-func (m *Manager) setStatus(s *session, status Status, message string) {
+func (m *Manager) setStatus(s *session, status Status, message string) bool {
 	m.mu.Lock()
-	if m.sessions[s.artifactID] == s {
-		s.info.Status = status
-		s.info.Error = message
+	defer m.mu.Unlock()
+	if m.sessions[s.artifactID] != s || s.stopping || m.closed {
+		return false
 	}
-	m.mu.Unlock()
+	s.info.Status = status
+	s.info.Error = message
+	return true
 }
 
 func (m *Manager) setError(s *session, message string) {
-	m.setStatus(s, StatusError, message)
-	m.broadcast(Event{Type: "artifact_error", ArtifactID: s.artifactID, Message: message})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sessions[s.artifactID] != s || s.stopping || m.closed {
+		return
+	}
+	s.info.Status = StatusError
+	s.info.Error = message
+	m.broadcastLocked(Event{Type: "artifact_error", ArtifactID: s.artifactID, Message: message})
 }
 
 func (m *Manager) broadcast(event Event) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	m.broadcastLocked(event)
+}
+
+func (m *Manager) broadcastLocked(event Event) {
 	for channel := range m.subscribers[event.ArtifactID] {
 		select {
 		case channel <- event:
@@ -414,19 +550,66 @@ func (m *Manager) broadcast(event Event) {
 	}
 }
 
-func (m *Manager) createSnapshotWithRetry(directory string) (string, manifest.Manifest, string, error) {
+func (m *Manager) createSnapshotWithRetry(ctx context.Context, directory string) (string, manifest.Manifest, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var lastErr error
 	for attempt := 0; attempt < snapshotRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return "", manifest.Manifest{}, "", ctx.Err()
+		default:
+		}
+
 		path, currentManifest, hash, err := m.store.CreateLiveSnapshot(directory)
 		if err == nil {
-			return path, currentManifest, hash, nil
+			select {
+			case <-ctx.Done():
+				cleanupErr := m.store.RemoveLiveSnapshot(path)
+				if cleanupErr != nil {
+					return "", manifest.Manifest{}, "", errors.Join(ctx.Err(), cleanupErr)
+				}
+				return "", manifest.Manifest{}, "", ctx.Err()
+			default:
+				return path, currentManifest, hash, nil
+			}
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", manifest.Manifest{}, "", ctxErr
 		}
 		lastErr = err
 		if attempt+1 < snapshotRetries {
-			time.Sleep(snapshotRetryWait)
+			timer := time.NewTimer(snapshotRetryWait)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return "", manifest.Manifest{}, "", ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return "", manifest.Manifest{}, "", lastErr
+}
+
+func (m *Manager) cleanupStartup(watcher *fsnotify.Watcher, snapshot string) error {
+	var cleanupErrs []error
+	if watcher != nil {
+		if err := watcher.Close(); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("closing artifact watcher: %w", err))
+		}
+	}
+	if snapshot != "" {
+		if err := m.store.RemoveLiveSnapshot(snapshot); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("removing live snapshot: %w", err))
+		}
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func canonicalDirectory(directory string) (string, error) {
