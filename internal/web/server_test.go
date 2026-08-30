@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"artifactd/internal/create"
-	"artifactd/internal/live"
+	"artifactd/internal/edit"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
 	"artifactd/internal/runtime"
@@ -50,8 +50,12 @@ func TestServerServesCurrentArtifact(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if !strings.Contains(recorder.Body.String(), "Your artifact is ready.") {
+	body := recorder.Body.String()
+	if !strings.Contains(body, "Your artifact is ready.") {
 		t.Fatal("response did not contain artifact content")
+	}
+	if !strings.Contains(body, `data-artifactd-edit-overlay`) {
+		t.Fatal("published HTML did not contain the edit overlay")
 	}
 	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
 		t.Fatalf("X-Content-Type-Options = %q", got)
@@ -139,7 +143,7 @@ func TestServerInjectsArtifactNavigation(t *testing.T) {
 	}
 }
 
-func TestServerServesLiveSnapshot(t *testing.T) {
+func TestServerServesEditRuntime(t *testing.T) {
 	store, err := OpenTestStore(t)
 	if err != nil {
 		t.Fatal(err)
@@ -165,14 +169,15 @@ func TestServerServesLiveSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	liveManager := live.NewManager(store)
-	if _, err := liveManager.Start(t.Context(), source); err != nil {
+	editManager := edit.NewManager(store)
+	session, err := editManager.Begin(t.Context(), source, "Updating dashboard")
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer liveManager.Close()
+	defer editManager.Close()
 	server := NewServer(store, "artifacts.localhost", func(id string) string {
 		return "http://" + id + ".artifacts.localhost:7337/"
-	}, "artifactd-home", runtime.NewStore(), system.NewProvider(), filesystem.NewProvider(), liveManager)
+	}, "artifactd-home", runtime.NewStore(), system.NewProvider(), filesystem.NewProvider(), editManager)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -181,31 +186,39 @@ func TestServerServesLiveSnapshot(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if !strings.Contains(recorder.Body.String(), "data-artifactd-live") {
-		t.Fatal("live HTML did not contain the refresh client")
+	if !strings.Contains(recorder.Body.String(), `data-artifactd-edit`) {
+		t.Fatal("edit HTML did not contain the edit client")
 	}
 	body := recorder.Body.String()
 	if !strings.Contains(body, "data-artifactd-navigation") {
 		t.Fatal("live HTML did not contain artifact navigation")
 	}
-	if !strings.Contains(body, "data-artifactd-live-overlay") || !strings.Contains(body, "/_artifactd/live.css") {
-		t.Fatal("live HTML did not contain the build overlay")
+	if !strings.Contains(body, "data-artifactd-edit-overlay") || !strings.Contains(body, "/_artifactd/edit.css") {
+		t.Fatal("edit HTML did not contain the edit overlay")
+	}
+
+	statusRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/edit", nil)
+	statusRequest.Host = "demo.artifacts.localhost"
+	statusRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(statusRecorder, statusRequest)
+	if statusRecorder.Code != http.StatusOK || !strings.Contains(statusRecorder.Body.String(), session.SessionID) {
+		t.Fatalf("edit status response = %d %s", statusRecorder.Code, statusRecorder.Body.String())
 	}
 
 	cssRecorder := httptest.NewRecorder()
-	cssRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/live.css", nil)
+	cssRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/edit.css", nil)
 	cssRequest.Host = "demo.artifacts.localhost"
 	server.Handler().ServeHTTP(cssRecorder, cssRequest)
-	if cssRecorder.Code != http.StatusOK || !strings.Contains(cssRecorder.Body.String(), "artifactd-building") {
-		t.Fatalf("live stylesheet response = %d %s", cssRecorder.Code, cssRecorder.Body.String())
+	if cssRecorder.Code != http.StatusOK || !strings.Contains(cssRecorder.Body.String(), "artifactd-editing") {
+		t.Fatalf("edit stylesheet response = %d %s", cssRecorder.Code, cssRecorder.Body.String())
 	}
 
 	clientRecorder := httptest.NewRecorder()
-	clientRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/live.js", nil)
+	clientRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/edit.js", nil)
 	clientRequest.Host = "demo.artifacts.localhost"
 	server.Handler().ServeHTTP(clientRecorder, clientRequest)
 	if clientRecorder.Code != http.StatusOK || !strings.Contains(clientRecorder.Body.String(), "EventSource") {
-		t.Fatalf("live client response = %d %s", clientRecorder.Code, clientRecorder.Body.String())
+		t.Fatalf("edit client response = %d %s", clientRecorder.Code, clientRecorder.Body.String())
 	}
 }
 

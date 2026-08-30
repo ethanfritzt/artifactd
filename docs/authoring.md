@@ -23,7 +23,7 @@ styles.css
 app.js
 ```
 
-Edit those files directly. Run `artifact watch my-tool` to keep the artifact URL open during edits; the browser shows a blurred loading overlay while a valid snapshot is being assembled. Run `artifact publish my-tool` when you want an explicit immutable checkpoint. No dependency installation or build step is required.
+Edit those files directly. Before a multi-file change, run `artifact edit begin my-tool --message "Updating the artifact"`; the browser shows a loading overlay while the session is active. Run `artifact edit commit my-tool --session <session-id>` when the complete source is ready. Failed validation leaves the previous immutable version served, and no dependency installation or build step is required.
 
 ## Static data and runtime providers
 
@@ -36,7 +36,7 @@ Load the Artifactd design guidance when creating or redesigning an artifact. Sta
 ## Authoring guidelines
 
 - Keep the published output self-contained and free of CDN dependencies.
-- Watch the directory that contains the validated `artifact.json` and entrypoint.
+- Begin an edit session for the directory that contains the validated `artifact.json` and entrypoint before making coordinated changes.
 - Use semantic HTML and native browser controls where they fit the interaction.
 - Match the visual representation to the meaning of the data.
 - Keep runtime data reads read-only and agent-mediated writes outside the browser.

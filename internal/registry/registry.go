@@ -23,6 +23,7 @@ var (
 	ErrNotFound          = errors.New("artifact not found")
 	ErrWorkspaceNotFound = errors.New("workspace not found")
 	ErrProtectedArtifact = errors.New("system artifact cannot be archived")
+	ErrVersionConflict   = errors.New("artifact version changed")
 )
 
 var workspaceIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -423,6 +424,33 @@ func (r *Registry) Publish(
 	contentHash string,
 	workspaceID string,
 	install InstallVersion,
+) (PublishResult, error) {
+	return r.publish(ctx, m, rawManifest, contentHash, workspaceID, 0, install)
+}
+
+// PublishIfCurrent publishes only when the artifact still has expectedVersion.
+// The check occurs inside the same SQLite transaction that selects the next
+// version, so an edit cannot overwrite a concurrent publish.
+func (r *Registry) PublishIfCurrent(
+	ctx context.Context,
+	m manifest.Manifest,
+	rawManifest []byte,
+	contentHash string,
+	workspaceID string,
+	expectedVersion int,
+	install InstallVersion,
+) (PublishResult, error) {
+	return r.publish(ctx, m, rawManifest, contentHash, workspaceID, expectedVersion, install)
+}
+
+func (r *Registry) publish(
+	ctx context.Context,
+	m manifest.Manifest,
+	rawManifest []byte,
+	contentHash string,
+	workspaceID string,
+	expectedVersion int,
+	install InstallVersion,
 ) (result PublishResult, err error) {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()
@@ -465,6 +493,10 @@ func (r *Registry) Publish(
 		}
 	} else if queryErr != nil {
 		return PublishResult{}, fmt.Errorf("reading artifact version: %w", queryErr)
+	}
+
+	if expectedVersion > 0 && currentVersion != expectedVersion {
+		return PublishResult{}, ErrVersionConflict
 	}
 
 	versionNumber := currentVersion + 1

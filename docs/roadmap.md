@@ -27,13 +27,13 @@ This roadmap is directional. The project should advance based on whether the cor
 - read-only system and filesystem providers
 - live runtime data channels
 - agent-pushed JSON snapshots and updates
-- opt-in watched source directories with validated live preview snapshots and browser refresh events
+- transactional source editing sessions with browser status events and refresh after commit
 
 ## Phase 3 — Artifact authoring and library
 
 - versioned artifact specification with runtime metadata
 - dependency-free static web authoring scaffold
-- direct static artifact publishing and live preview
+- direct static artifact publishing and transactional preview editing
 - design guidance and reliable artifact states
 - `artifacts.localhost` library
 - visual cards and metadata
@@ -64,7 +64,7 @@ This roadmap is directional. The project should advance based on whether the cor
 - typed artifact outputs and composition
 - provenance and semantic search
 - desktop `.desktop` entries
-- state-preserving live editing for future authoring helpers
+- state-preserving HMR for future authoring helpers with an explicit runtime contract
 - fork/eject workflows
 - optional sharing and remote runtimes
 - open artifact protocol specification

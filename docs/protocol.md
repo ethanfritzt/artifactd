@@ -52,40 +52,54 @@ POST   /v1/artifacts/{id}/archive
 DELETE /v1/artifacts/{id}/archive
 ```
 
-Archiving removes the artifact from the default list and Artifactd Home, preserves its stable URL and version history, and stops any active live preview. The system artifact `artifactd-home` cannot be archived.
+Archiving removes the artifact from the default list and Artifactd Home, preserves its stable URL and version history, and aborts any active editing session. The system artifact `artifactd-home` cannot be archived.
 
-## Live preview
+## Editing sessions
 
-Start, inspect, and stop an ephemeral live preview over the Unix socket:
+Editing is an explicit transaction over the Unix socket:
 
 ```text
-POST   /v1/artifacts/{id}/watch
-GET    /v1/artifacts/{id}/live
-DELETE /v1/artifacts/{id}/watch
+POST   /v1/artifacts/{id}/edit
+GET    /v1/artifacts/{id}/edit
+POST   /v1/artifacts/{id}/edit/progress
+POST   /v1/artifacts/{id}/edit/commit
+DELETE /v1/artifacts/{id}/edit?session_id=...
 ```
 
-Start request:
+Begin request:
 
 ```json
-{"directory":"/home/user/project/demo"}
+{"directory":"/home/user/project/demo","message":"Redesigning the dashboard"}
 ```
 
-The watched directory must contain a valid artifact with the requested stable ID and must already have a published version. The daemon validates and snapshots the directory without changing the registry version. A successful response includes the live status, content hash, and stable URL.
+The directory must contain a valid artifact with the requested stable ID and an existing published version. The daemon returns an opaque session ID and the immutable base version:
 
-While a live session is active, the browser origin serves the latest validated live snapshot. The browser-only endpoint below emits Server-Sent Events; the injected live client reloads the page after an `artifact_changed` event:
+```json
+{"session_id":"edit-...","artifact_id":"demo","base_version":66,"status":"editing","expires_at":"..."}
+```
+
+The agent may edit the source directory normally. Those intermediate files are never served. Progress messages renew the session lease and are presented by the browser overlay. Commit is a multipart request containing `session_id`, `base_version`, `source_path`, and the complete artifact file set. The daemon validates the complete package and publishes exactly one immutable version only if the base version is still current.
+
+The browser-only endpoint emits Server-Sent Events:
 
 ```text
 GET /_artifactd/events
+GET /_artifactd/edit
 ```
 
-Event data has the form:
+Events have the form:
 
 ```json
-{"type":"artifact_changed","artifact_id":"demo","hash":"..."}
-{"type":"artifact_error","artifact_id":"demo","message":"..."}
+{"type":"edit_started","artifact_id":"demo","session_id":"edit-...","message":"..."}
+{"type":"edit_progress","artifact_id":"demo","session_id":"edit-...","message":"..."}
+{"type":"edit_committing","artifact_id":"demo","session_id":"edit-...","message":"Publishing artifact…"}
+{"type":"artifact_changed","artifact_id":"demo","session_id":"edit-..."}
+{"type":"edit_error","artifact_id":"demo","session_id":"edit-...","error":"..."}
+{"type":"edit_aborted","artifact_id":"demo","session_id":"edit-..."}
+{"type":"edit_expired","artifact_id":"demo","session_id":"edit-..."}
 ```
 
-Invalid edits do not replace the previous valid snapshot. Live sessions are in-memory and end when explicitly stopped, the watch lease expires, or the daemon shuts down.
+The injected browser client displays the old published version under a loading overlay during the session and reloads once after a successful commit. Invalid packages leave the previous published version unchanged. Sessions are in-memory, expire after inactivity, and end when aborted, committed, or the daemon shuts down.
 
 ## Versions and restore
 
@@ -102,7 +116,7 @@ Restore request:
 {"version":1}
 ```
 
-Restoring changes the durable current-version pointer and stops any active live session. It never copies files back into the agent's source workspace.
+Restoring changes the durable current-version pointer and aborts any active editing session. It never copies files back into the agent's source workspace.
 
 ## Workspaces
 
@@ -153,11 +167,11 @@ GET /_artifactd/library
 GET /_artifactd/system
 GET /_artifactd/files?path=...&depth=...
 GET /_artifactd/data/{source}
-GET /_artifactd/live
+GET /_artifactd/edit
 GET /_artifactd/events
 ```
 
-`/_artifactd/library` returns the current artifact metadata from SQLite. `/_artifactd/system` returns CPU, memory, load, and process data. `/_artifactd/files` returns metadata scoped to the artifact's registered workspace. `/_artifactd/live` returns the active live-preview status, and `/_artifactd/events` emits live-preview changes over Server-Sent Events. The legacy path URL remains available for static content and redirects its artifact root to the artifact-specific origin.
+`/_artifactd/library` returns the current artifact metadata from SQLite. `/_artifactd/system` returns CPU, memory, load, and process data. `/_artifactd/files` returns metadata scoped to the artifact's registered workspace. `/_artifactd/edit` returns the active editing session, and `/_artifactd/events` emits editing transitions over Server-Sent Events. The legacy path URL remains available for static content and redirects its artifact root to the artifact-specific origin.
 
 ## Errors
 

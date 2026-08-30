@@ -11,9 +11,9 @@ When an interactive visual, calculator, dashboard, explorer, or reusable UI
 would be more useful than plain text:
 
 1. Create an Artifactd-managed source with `artifact create --id <id>`; the initial scaffold is published automatically.
-2. Generate the artifact files in the returned source directory.
-3. Run `artifact watch <id>` for a live preview while editing, or use `artifact create --open` when the user wants the initial URL opened automatically.
-4. Run `artifact publish <id>` for an explicit immutable checkpoint and return the artifact URL.
+2. Begin an editing session with `artifact edit begin <id> --message "..."` before generating files.
+3. Generate the artifact files in the returned source directory; optionally send progress messages with `artifact edit progress`.
+4. Commit the complete artifact with `artifact edit commit <id> --session <session-id>` and return the artifact URL. Use `artifact create --open` when the user wants the initial URL opened automatically.
 
 Use `artifact create --path <directory> --id <id>` only when repository-local
 source is intentional.
@@ -67,26 +67,24 @@ artifact data push project-dashboard github --file data.json
 
 The artifact reads that source from `/_artifactd/data/github`. MCP credentials and command execution remain inside the agent. Runtime data is ephemeral and does not mutate immutable artifact versions.
 
-## Live artifact editing
+## Transactional artifact editing
 
-After `artifact create` has published the initial scaffold, Pi can keep the artifact open while editing its source directory:
-
-```bash
-artifact watch demo
-```
-
-These commands resolve `demo` to the managed source directory. Existing source
-paths remain supported for artifacts created before managed sources were added.
-
-`artifact watch` starts an opt-in local live preview and prints the same stable URL. File changes are validated, copied into an atomic temporary snapshot, and cause the browser to refresh automatically. While a snapshot is being assembled, the existing page is blurred and covered by a loading indicator. Invalid or incomplete edits leave the last valid preview available. A later `artifact publish` remains the explicit durable checkpoint and creates an immutable version; ordinary saves do not create versions.
-
-Watch mode is intended for a foreground agent session and should be stopped with `Ctrl-C` or:
+After `artifact create` has published the initial scaffold, begin a session before making a multi-file change:
 
 ```bash
-artifact unwatch demo
+artifact edit begin demo --message "Redesigning the dashboard" --output json
+# keep the returned session_id
+artifact edit progress demo --session <session-id> --message "Finishing responsive styles"
+artifact edit commit demo --session <session-id>
 ```
 
-Watch the raw source directory because artifactd serves static files directly and does not run build commands.
+The begin command tells Artifactd and the browser that editing has started. Pi can then write the managed source files normally. Artifactd does not watch intermediate filesystem changes and never serves an incomplete source tree. Commit validates and publishes exactly one immutable version, then the browser reloads the stable URL. If validation fails, the previous version remains served and the session can be retried. Abort an abandoned session with:
+
+```bash
+artifact edit abort demo --session "$session_id"
+```
+
+Sessions expire after inactivity. The protocol is agent-agnostic: Pi, another shell-capable agent, or a human can use the same commands.
 
 ## Future agent actions
 

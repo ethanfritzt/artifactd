@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"artifactd/internal/config"
+	"artifactd/internal/edit"
 	"artifactd/internal/ipc"
-	"artifactd/internal/live"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
 	"artifactd/internal/registry"
@@ -58,17 +58,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Sprintf("http://%s.%s:%d/", id, d.config.PublicHost, d.config.Port)
 	}
 	dataStore := runtime.NewStore()
-	liveManager := live.NewManager(d.store)
-	liveClosed := false
-	closeLive := func() {
-		if !liveClosed {
-			liveManager.Close()
-			liveClosed = true
-		}
-	}
-	defer closeLive()
+	editManager := edit.NewManager(d.store)
+	defer editManager.Close()
 	controlServer := &http.Server{
-		Handler:           ipc.NewServer(d.store, publicURL, dataStore, liveManager).Handler(),
+		Handler:           ipc.NewServer(d.store, publicURL, dataStore, editManager).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -85,11 +78,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			dataStore,
 			system.NewProvider(),
 			filesystem.NewProvider(),
-			liveManager,
+			editManager,
 		).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
-		// SSE live-preview connections are intentionally long-lived.
+		// SSE edit-event connections are intentionally long-lived.
 		WriteTimeout:   0,
 		IdleTimeout:    120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
@@ -119,11 +112,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	slog.Info("artifactd started", "socket", d.config.SocketPath, "address", browserServer.Addr)
 	select {
 	case <-ctx.Done():
-		closeLive()
 		d.shutdown(controlServer, browserServer)
 		return nil
 	case err := <-errs:
-		closeLive()
 		d.shutdown(controlServer, browserServer)
 		return err
 	}

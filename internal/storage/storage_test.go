@@ -179,28 +179,6 @@ func TestRemoveStagingRejectsPathsOutsideStorage(t *testing.T) {
 	}
 }
 
-func TestRemoveLiveSnapshotRejectsSymlinkComponents(t *testing.T) {
-	store, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = store.Close() }()
-	outside := t.TempDir()
-	snapshot := filepath.Join(outside, "snapshots", "snapshot-1")
-	if err := os.MkdirAll(snapshot, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(store.root, "live", "demo")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	if err := store.RemoveLiveSnapshot(filepath.Join(store.root, "live", "demo", "snapshots", "snapshot-1")); err == nil {
-		t.Fatal("RemoveLiveSnapshot() accepted a symlink component")
-	}
-	if _, err := os.Stat(snapshot); err != nil {
-		t.Fatalf("outside snapshot was changed: %v", err)
-	}
-}
-
 func TestResolveRejectsSymlinkComponents(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

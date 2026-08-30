@@ -257,55 +257,163 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]model.Workspace, error) 
 	return response.Workspaces, nil
 }
 
-func (c *Client) Watch(ctx context.Context, directory string) (protocol.LiveResponse, error) {
-	if directory == "" {
-		return protocol.LiveResponse{}, fmt.Errorf("artifact directory is required")
-	}
-	absoluteDirectory, err := filepath.Abs(directory)
+func (c *Client) BeginEdit(ctx context.Context, directory, message string) (protocol.EditSessionResponse, error) {
+	absoluteDirectory, err := absoluteDirectory(directory)
 	if err != nil {
-		return protocol.LiveResponse{}, fmt.Errorf("resolving artifact directory: %w", err)
+		return protocol.EditSessionResponse{}, err
 	}
-	absoluteDirectory = filepath.Clean(absoluteDirectory)
-	if err := protocol.ValidateAbsolutePath(absoluteDirectory); err != nil {
-		return protocol.LiveResponse{}, err
-	}
-	body, err := json.Marshal(protocol.WatchRequest{Directory: absoluteDirectory})
+	artifactID, err := manifestFromDirectory(absoluteDirectory)
 	if err != nil {
-		return protocol.LiveResponse{}, fmt.Errorf("encoding watch request: %w", err)
+		return protocol.EditSessionResponse{}, err
 	}
-	var response protocol.LiveResponse
-	artifact, err := manifestFromDirectory(absoluteDirectory)
+	body, err := json.Marshal(protocol.EditBeginRequest{Directory: absoluteDirectory, Message: message})
 	if err != nil {
-		return protocol.LiveResponse{}, err
+		return protocol.EditSessionResponse{}, fmt.Errorf("encoding edit request: %w", err)
 	}
-	requestPath, err := artifactPath(artifact, "/watch")
+	requestPath, err := artifactPath(artifactID, "/edit")
 	if err != nil {
-		return protocol.LiveResponse{}, err
+		return protocol.EditSessionResponse{}, err
 	}
+	var response protocol.EditSessionResponse
 	if err := c.doJSONWithContentType(ctx, http.MethodPost, requestPath, bytes.NewReader(body), "application/json", &response); err != nil {
-		return protocol.LiveResponse{}, err
+		return protocol.EditSessionResponse{}, err
 	}
 	return response, nil
 }
 
-func (c *Client) Unwatch(ctx context.Context, artifactID string) error {
-	requestPath, err := artifactPath(artifactID, "/watch")
+func (c *Client) EditProgress(ctx context.Context, artifactID, sessionID, message string) (protocol.EditSessionResponse, error) {
+	body, err := json.Marshal(protocol.EditProgressRequest{SessionID: sessionID, Message: message})
+	if err != nil {
+		return protocol.EditSessionResponse{}, fmt.Errorf("encoding edit progress: %w", err)
+	}
+	requestPath, err := artifactPath(artifactID, "/edit/progress")
+	if err != nil {
+		return protocol.EditSessionResponse{}, err
+	}
+	var response protocol.EditSessionResponse
+	if err := c.doJSONWithContentType(ctx, http.MethodPost, requestPath, bytes.NewReader(body), "application/json", &response); err != nil {
+		return protocol.EditSessionResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) EditStatus(ctx context.Context, artifactID string) (protocol.EditSessionResponse, error) {
+	requestPath, err := artifactPath(artifactID, "/edit")
+	if err != nil {
+		return protocol.EditSessionResponse{}, err
+	}
+	var response protocol.EditSessionResponse
+	if err := c.doJSON(ctx, http.MethodGet, requestPath, nil, &response); err != nil {
+		return protocol.EditSessionResponse{}, err
+	}
+	return response, nil
+}
+
+func (c *Client) EditAbort(ctx context.Context, artifactID, sessionID string) error {
+	requestPath, err := artifactPath(artifactID, "/edit")
 	if err != nil {
 		return err
 	}
+	requestPath += "?session_id=" + url.QueryEscape(sessionID)
 	return c.doJSON(ctx, http.MethodDelete, requestPath, nil, nil)
 }
 
-func (c *Client) Live(ctx context.Context, artifactID string) (protocol.LiveResponse, error) {
-	requestPath, err := artifactPath(artifactID, "/live")
+func (c *Client) EditCommit(ctx context.Context, artifactID, sessionID string, baseVersion int, directory string) (protocol.PublishResponse, error) {
+	absoluteDirectory, err := absoluteDirectory(directory)
 	if err != nil {
-		return protocol.LiveResponse{}, err
+		return protocol.PublishResponse{}, err
 	}
-	var response protocol.LiveResponse
-	if err := c.doJSON(ctx, http.MethodGet, requestPath, nil, &response); err != nil {
-		return protocol.LiveResponse{}, err
+	if _, err := manifestFromDirectory(absoluteDirectory); err != nil {
+		return protocol.PublishResponse{}, err
 	}
-	return response, nil
+
+	pipeReader, pipeWriter := io.Pipe()
+	multipartWriter := multipart.NewWriter(pipeWriter)
+	contentType := multipartWriter.FormDataContentType()
+	writerDone := make(chan error, 1)
+	go func() {
+		err := multipartWriter.WriteField("session_id", sessionID)
+		if err == nil {
+			err = multipartWriter.WriteField("base_version", fmt.Sprint(baseVersion))
+		}
+		if err == nil {
+			err = multipartWriter.WriteField("source_path", absoluteDirectory)
+		}
+		if err == nil {
+			err = writeMultipart(multipartWriter, absoluteDirectory)
+		}
+		if err == nil {
+			err = multipartWriter.Close()
+		}
+		if err != nil {
+			_ = pipeWriter.CloseWithError(err)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		writerDone <- err
+	}()
+
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	requestPath, err := artifactPath(artifactID, "/edit/commit")
+	if err != nil {
+		_ = pipeReader.Close()
+		<-writerDone
+		return protocol.PublishResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, "http://artifactd"+requestPath, pipeReader)
+	if err != nil {
+		_ = pipeReader.Close()
+		<-writerDone
+		return protocol.PublishResponse{}, fmt.Errorf("creating edit commit request: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Accept", "application/json")
+	response, err := c.httpClient.Do(req)
+	if err != nil {
+		_ = pipeReader.Close()
+		writerErr := <-writerDone
+		if writerErr != nil {
+			return protocol.PublishResponse{}, errors.Join(fmt.Errorf("committing edit: %w", err), writerErr)
+		}
+		return protocol.PublishResponse{}, fmt.Errorf("committing edit: %w", err)
+	}
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			slog.Debug("closing daemon response", "error", closeErr)
+		}
+	}()
+	writerErr := <-writerDone
+	if writerErr != nil {
+		return protocol.PublishResponse{}, writerErr
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return protocol.PublishResponse{}, decodeError(response.Body, response.Status, response.StatusCode)
+	}
+	var result protocol.PublishResponse
+	if err := decodeResponse(response.Body, &result); err != nil {
+		return protocol.PublishResponse{}, fmt.Errorf("decoding edit commit response: %w", err)
+	}
+	return result, nil
+}
+
+func absoluteDirectory(directory string) (string, error) {
+	if directory == "" {
+		return "", fmt.Errorf("artifact directory is required")
+	}
+	absoluteDirectory, err := filepath.Abs(directory)
+	if err != nil {
+		return "", fmt.Errorf("resolving artifact directory: %w", err)
+	}
+	absoluteDirectory = filepath.Clean(absoluteDirectory)
+	if err := protocol.ValidateAbsolutePath(absoluteDirectory); err != nil {
+		return "", err
+	}
+	resolvedDirectory, err := filepath.EvalSymlinks(absoluteDirectory)
+	if err != nil {
+		return "", fmt.Errorf("resolving artifact directory symlinks: %w", err)
+	}
+	return filepath.Clean(resolvedDirectory), nil
 }
 
 func (c *Client) Versions(ctx context.Context, artifactID string) ([]model.Version, error) {

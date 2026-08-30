@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"artifactd/internal/live"
+	"artifactd/internal/edit"
 	"artifactd/internal/model"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
@@ -28,47 +28,70 @@ import (
 
 var artifactHostID = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
-const liveClientScript = `(() => {
-  const events = new EventSource("/_artifactd/events");
-  const setBuilding = (building) => {
-    document.documentElement.classList.toggle("artifactd-building", building);
-    if (building) {
+const editClientScript = `(() => {
+  const overlayMessage = document.querySelector("[data-artifactd-edit-overlay-message]");
+  let reloading = false;
+
+  const setEditing = (editing, message) => {
+    document.documentElement.classList.toggle("artifactd-editing", editing);
+    if (editing) {
       document.documentElement.setAttribute("aria-busy", "true");
     } else {
       document.documentElement.removeAttribute("aria-busy");
     }
+    if (overlayMessage && message) {
+      overlayMessage.textContent = message;
+    }
   };
-  const pollStatus = async () => {
+
+  const reload = (message) => {
+    if (reloading) return;
+    reloading = true;
+    setEditing(true, message);
+    window.location.reload();
+  };
+
+  const applyEvent = (event) => {
+    if (["edit_started", "edit_progress", "edit_committing", "edit_error"].includes(event.type)) {
+      setEditing(true, event.message || event.error || "Editing artifact…");
+      return;
+    }
+    if (event.type === "artifact_changed") {
+      reload("Publishing artifact…");
+      return;
+    }
+    if (event.type === "edit_aborted" || event.type === "edit_expired") {
+      setEditing(false);
+    }
+  };
+
+  const loadStatus = async () => {
     try {
-      const response = await fetch("/_artifactd/live", { cache: "no-store" });
+      const response = await fetch("/_artifactd/edit", { cache: "no-store" });
       if (response.ok) {
         const status = await response.json();
-        setBuilding(status.status === "building");
+        setEditing(true, status.message || status.error || "Editing artifact…");
+      } else if (response.status === 404) {
+        setEditing(false);
       }
     } catch (_) {
-      // The event stream remains the source of truth for refreshes.
+      // The event stream remains the source of truth for edit transitions.
     }
-    window.setTimeout(pollStatus, 100);
   };
-  pollStatus();
+
+  const events = new EventSource("/_artifactd/events");
   events.onmessage = (message) => {
     try {
-      const event = JSON.parse(message.data);
-      if (event.type === "artifact_changed") {
-        setBuilding(false);
-        window.location.reload();
-      } else if (event.type === "artifact_error") {
-        // Keep the last valid preview usable when an edit is incomplete.
-        setBuilding(false);
-      }
+      applyEvent(JSON.parse(message.data));
     } catch (_) {
-      // Ignore malformed events; the next connection will retry automatically.
+      // Ignore malformed events; EventSource will reconnect automatically.
     }
   };
+  loadStatus();
 })();
 `
 
-const livePreviewCSS = `.artifactd-live-overlay {
+const editOverlayCSS = `.artifactd-edit-overlay {
   position: fixed;
   inset: 0;
   z-index: 2147483646;
@@ -86,7 +109,7 @@ const livePreviewCSS = `.artifactd-live-overlay {
   transition: opacity .18s ease, visibility .18s ease;
   font: 500 .95rem/1.4 system-ui, sans-serif;
 }
-.artifactd-live-overlay__content {
+.artifactd-edit-overlay__content {
   display: grid;
   justify-items: center;
   gap: .75rem;
@@ -96,28 +119,28 @@ const livePreviewCSS = `.artifactd-live-overlay {
   background: color-mix(in srgb, Canvas 88%, transparent);
   box-shadow: 0 .75rem 2rem #0002;
 }
-.artifactd-live-overlay__spinner {
+.artifactd-edit-overlay__spinner {
   width: 1.5rem;
   height: 1.5rem;
   border: .18rem solid color-mix(in srgb, CanvasText 20%, transparent);
   border-top-color: currentColor;
   border-radius: 50%;
-  animation: artifactd-live-spin .8s linear infinite;
+  animation: artifactd-edit-spin .8s linear infinite;
 }
-html.artifactd-building .artifactd-live-overlay {
+html.artifactd-editing .artifactd-edit-overlay {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
 }
-@keyframes artifactd-live-spin {
+@keyframes artifactd-edit-spin {
   to { transform: rotate(360deg); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .artifactd-live-overlay { transition: none; }
-  .artifactd-live-overlay__spinner { animation: none; }
+  .artifactd-edit-overlay { transition: none; }
+  .artifactd-edit-overlay__spinner { animation: none; }
 }
 @media print {
-  .artifactd-live-overlay { display: none; }
+  .artifactd-edit-overlay { display: none; }
 }
 `
 
@@ -163,7 +186,7 @@ type Server struct {
 	data       *runtime.Store
 	system     *system.Provider
 	filesystem *filesystem.Provider
-	live       *live.Manager
+	edit       *edit.Manager
 }
 
 func NewServer(
@@ -174,7 +197,7 @@ func NewServer(
 	data *runtime.Store,
 	system *system.Provider,
 	files *filesystem.Provider,
-	liveManager *live.Manager,
+	editManager *edit.Manager,
 ) *Server {
 	return &Server{
 		store:      store,
@@ -184,7 +207,7 @@ func NewServer(
 		data:       data,
 		system:     system,
 		filesystem: files,
-		live:       liveManager,
+		edit:       editManager,
 	}
 }
 
@@ -225,7 +248,7 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 }
 
 // serveArtifact is shared by artifact-host and legacy-path routes so that both
-// routes select the same version, live snapshot, and response decoration.
+// routes select the same published version and response decoration.
 func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, id, relative, runtimePath string) {
 	artifact, version, err := s.store.Current(r.Context(), id)
 	if errors.Is(err, registry.ErrNotFound) {
@@ -242,21 +265,11 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request, id, relat
 	}
 
 	root := version.Path
-	entry := version.Entry
-	livePreview := false
-	if s.live != nil {
-		if snapshot, release, ok := s.live.Snapshot(artifact.ID); ok {
-			defer release()
-			root = snapshot.Path
-			entry = snapshot.Entry
-			livePreview = true
-		}
-	}
 	if relative == "" {
-		relative = entry
+		relative = version.Entry
 	}
-	decorate := relative == entry && artifact.ID != s.defaultID
-	s.serveFile(w, r, root, relative, livePreview, decorate)
+	decorate := relative == version.Entry && artifact.ID != s.defaultID
+	s.serveFile(w, r, root, relative, decorate)
 }
 
 func (s *Server) serveLegacyPath(w http.ResponseWriter, r *http.Request) {
@@ -300,12 +313,12 @@ func (s *Server) serveLegacyPath(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID string, version model.Version, runtimePath string) {
 	parts := strings.Split(runtimePath, "/")
-	if len(parts) == 1 && parts[0] == "live.js" {
-		s.serveLiveClient(w)
+	if len(parts) == 1 && parts[0] == "edit.js" {
+		s.serveEditClient(w)
 		return
 	}
-	if len(parts) == 1 && parts[0] == "live.css" {
-		s.serveLiveCSS(w)
+	if len(parts) == 1 && parts[0] == "edit.css" {
+		s.serveEditCSS(w)
 		return
 	}
 	if len(parts) == 1 && parts[0] == "navigation.css" {
@@ -316,21 +329,21 @@ func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID
 		s.serveEvents(w, r, artifactID)
 		return
 	}
-	if len(parts) == 1 && parts[0] == "live" {
-		if s.live == nil {
-			writeRuntimeError(w, http.StatusNotImplemented, "live preview is unavailable")
+	if len(parts) == 1 && parts[0] == "edit" {
+		if s.edit == nil {
+			writeRuntimeError(w, http.StatusNotImplemented, "editing is unavailable")
 			return
 		}
-		info, err := s.live.Info(artifactID)
-		if errors.Is(err, live.ErrNotWatching) {
-			writeRuntimeError(w, http.StatusNotFound, "live preview is not active")
+		session, err := s.edit.Status(artifactID)
+		if errors.Is(err, edit.ErrNoEdit) {
+			writeRuntimeError(w, http.StatusNotFound, "artifact is not being edited")
 			return
 		}
 		if err != nil {
-			writeRuntimeError(w, http.StatusInternalServerError, "live preview is unavailable")
+			writeRuntimeError(w, http.StatusInternalServerError, "editing is unavailable")
 			return
 		}
-		writeJSON(w, http.StatusOK, info)
+		writeJSON(w, http.StatusOK, session)
 		return
 	}
 	if len(parts) == 1 && parts[0] == "library" {
@@ -399,22 +412,22 @@ func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID
 }
 
 func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, artifactID string) {
-	if s.live == nil {
-		writeRuntimeError(w, http.StatusNotImplemented, "live preview is unavailable")
+	if s.edit == nil {
+		writeRuntimeError(w, http.StatusNotImplemented, "editing is unavailable")
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeRuntimeError(w, http.StatusInternalServerError, "live events are unavailable")
+		writeRuntimeError(w, http.StatusInternalServerError, "edit events are unavailable")
 		return
 	}
-	events, unsubscribe, err := s.live.Subscribe(artifactID)
-	if errors.Is(err, live.ErrTooManyClients) {
+	events, unsubscribe, err := s.edit.Subscribe(artifactID)
+	if errors.Is(err, edit.ErrTooManyClients) {
 		writeRuntimeError(w, http.StatusTooManyRequests, err.Error())
 		return
 	}
 	if err != nil {
-		writeRuntimeError(w, http.StatusInternalServerError, "live events are unavailable")
+		writeRuntimeError(w, http.StatusInternalServerError, "edit events are unavailable")
 		return
 	}
 	defer unsubscribe()
@@ -440,7 +453,7 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, artifactID 
 			}
 			encoded, err := json.Marshal(event)
 			if err != nil {
-				slog.Error("encoding live event", "artifact_id", artifactID, "error", err)
+				slog.Error("encoding edit event", "artifact_id", artifactID, "error", err)
 				continue
 			}
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", encoded); err != nil {
@@ -456,21 +469,21 @@ func (s *Server) serveEvents(w http.ResponseWriter, r *http.Request, artifactID 
 	}
 }
 
-func (s *Server) serveLiveClient(w http.ResponseWriter) {
+func (s *Server) serveEditClient(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	if _, err := fmt.Fprint(w, liveClientScript); err != nil {
-		slog.Error("writing live client", "error", err)
+	if _, err := fmt.Fprint(w, editClientScript); err != nil {
+		slog.Error("writing edit client", "error", err)
 	}
 }
 
-func (s *Server) serveLiveCSS(w http.ResponseWriter) {
+func (s *Server) serveEditCSS(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	if _, err := fmt.Fprint(w, livePreviewCSS); err != nil {
-		slog.Error("writing live preview stylesheet", "error", err)
+	if _, err := fmt.Fprint(w, editOverlayCSS); err != nil {
+		slog.Error("writing edit overlay stylesheet", "error", err)
 	}
 }
 
@@ -488,7 +501,6 @@ func (s *Server) serveFile(
 	r *http.Request,
 	root,
 	relative string,
-	livePreview,
 	decorate bool,
 ) {
 	filePath, err := safeFilePath(root, relative)
@@ -502,8 +514,8 @@ func (s *Server) serveFile(
 		return
 	}
 	isHTML := strings.EqualFold(filepath.Ext(filePath), ".html")
-	if (livePreview || decorate) && isHTML {
-		s.serveHTML(w, r, filePath, livePreview, decorate)
+	if isHTML {
+		s.serveHTML(w, r, filePath, decorate)
 		return
 	}
 	file, err := os.Open(filePath)
@@ -519,7 +531,6 @@ func (s *Server) serveHTML(
 	w http.ResponseWriter,
 	r *http.Request,
 	filePath string,
-	livePreview,
 	decorate bool,
 ) {
 	info, err := os.Lstat(filePath)
@@ -532,28 +543,26 @@ func (s *Server) serveHTML(
 		http.NotFound(w, r)
 		return
 	}
-	if livePreview {
-		content = injectLiveClient(content)
-	}
+	content = injectEditClient(content)
 	if decorate {
 		content = injectArtifactNavigation(content, s.publicURL(s.defaultID))
 	}
 	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), bytes.NewReader(content))
 }
 
-func injectLiveClient(content []byte) []byte {
-	const marker = `data-artifactd-live`
+func injectEditClient(content []byte) []byte {
+	const marker = `data-artifactd-edit`
 	if bytes.Contains(content, []byte(marker)) {
 		return content
 	}
-	injected := `<link rel="stylesheet" href="/_artifactd/live.css">
-<div class="artifactd-live-overlay" data-artifactd-live-overlay role="status" aria-live="polite">
-  <div class="artifactd-live-overlay__content">
-    <div class="artifactd-live-overlay__spinner" aria-hidden="true"></div>
-    <span>Building preview…</span>
+	injected := `<link rel="stylesheet" href="/_artifactd/edit.css">
+<div class="artifactd-edit-overlay" data-artifactd-edit-overlay role="status" aria-live="polite">
+  <div class="artifactd-edit-overlay__content">
+    <div class="artifactd-edit-overlay__spinner" aria-hidden="true"></div>
+    <span data-artifactd-edit-overlay-message>Editing artifact…</span>
   </div>
 </div>
-<script data-artifactd-live src="/_artifactd/live.js"></script>`
+<script data-artifactd-edit src="/_artifactd/edit.js"></script>`
 	return injectBeforeBodyClose(content, injected)
 }
 
@@ -689,7 +698,7 @@ func safeFilePath(root, relative string) (string, error) {
 		return "", fmt.Errorf("artifact path escapes version")
 	}
 
-	// Published and live snapshots reject symlinks at copy time. Check again
+	// Published versions reject symlinks at copy time. Check again
 	// while serving so a damaged or externally modified snapshot cannot turn
 	// the browser route into a file read outside its version root.
 	current := root

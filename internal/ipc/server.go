@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"artifactd/internal/live"
+	"artifactd/internal/edit"
 	"artifactd/internal/manifest"
 	"artifactd/internal/model"
 	"artifactd/internal/protocol"
@@ -39,11 +40,11 @@ type Server struct {
 	store     *storage.Store
 	publicURL func(string) string
 	data      *runtime.Store
-	live      *live.Manager
+	edit      *edit.Manager
 }
 
-func NewServer(store *storage.Store, publicURL func(string) string, data *runtime.Store, liveManager *live.Manager) *Server {
-	return &Server{store: store, publicURL: publicURL, data: data, live: liveManager}
+func NewServer(store *storage.Store, publicURL func(string) string, data *runtime.Store, editManager *edit.Manager) *Server {
+	return &Server{store: store, publicURL: publicURL, data: data, edit: editManager}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -99,10 +100,12 @@ func (s *Server) artifactRoute(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 3 && parts[1] == "data":
 		s.pushData(w, r, parts[0], parts[2])
-	case len(parts) == 2 && parts[1] == "watch":
-		s.watch(w, r, parts[0])
-	case len(parts) == 2 && parts[1] == "live":
-		s.liveInfo(w, r, parts[0])
+	case len(parts) == 2 && parts[1] == "edit":
+		s.editRoute(w, r, parts[0])
+	case len(parts) == 3 && parts[1] == "edit" && parts[2] == "progress":
+		s.editProgress(w, r, parts[0])
+	case len(parts) == 3 && parts[1] == "edit" && parts[2] == "commit":
+		s.editCommit(w, r, parts[0])
 	case len(parts) == 2 && parts[1] == "versions":
 		s.versions(w, r, parts[0])
 	case len(parts) == 2 && parts[1] == "restore":
@@ -114,64 +117,148 @@ func (s *Server) artifactRoute(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) watch(w http.ResponseWriter, r *http.Request, artifactID string) {
-	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+func (s *Server) editRoute(w http.ResponseWriter, r *http.Request, artifactID string) {
+	if s.edit == nil {
+		writeError(w, http.StatusNotImplemented, "editing is unavailable")
 		return
 	}
 	switch r.Method {
 	case http.MethodPost:
-		var request protocol.WatchRequest
+		var request protocol.EditBeginRequest
 		if err := decodeJSON(r, w, 16<<10, &request); err != nil || protocol.ValidateAbsolutePath(request.Directory) != nil {
-			writeError(w, http.StatusBadRequest, "invalid watch request")
+			writeError(w, http.StatusBadRequest, "invalid edit request")
 			return
 		}
-		if s.live == nil {
-			writeError(w, http.StatusNotImplemented, "live preview is unavailable")
-			return
-		}
-		info, err := s.live.Start(r.Context(), request.Directory)
+		session, err := s.edit.Begin(r.Context(), request.Directory, request.Message)
 		if err != nil {
-			status := http.StatusBadRequest
-			if errors.Is(err, live.ErrAlreadyWatching) {
-				status = http.StatusConflict
-			}
-			if errors.Is(err, live.ErrTooManySessions) || errors.Is(err, live.ErrTooManyClients) {
-				status = http.StatusTooManyRequests
-			}
-			writeError(w, status, err.Error())
+			status := statusForEditError(err)
+			writeError(w, status, userError(err))
 			return
 		}
-		if info.ArtifactID != artifactID {
-			if stopErr := s.live.Stop(info.ArtifactID); stopErr != nil {
-				writeInternalError(w, stopErr)
-				return
-			}
-			writeError(w, http.StatusBadRequest, "watch directory artifact ID does not match request")
+		if session.ArtifactID != artifactID {
+			_ = s.edit.Abort(session.ArtifactID, session.SessionID)
+			writeError(w, http.StatusBadRequest, "edit directory artifact ID does not match request")
 			return
 		}
-		writeJSON(w, http.StatusCreated, protocol.LiveResponse{
-			ArtifactID: info.ArtifactID,
-			Directory:  info.Directory,
-			Status:     string(info.Status),
-			Hash:       info.Hash,
-			Error:      info.Error,
-			URL:        s.publicURL(info.ArtifactID),
-		})
+		writeJSON(w, http.StatusCreated, editResponse(session, s.publicURL(session.ArtifactID)))
+	case http.MethodGet:
+		session, err := s.edit.Status(artifactID)
+		if errors.Is(err, edit.ErrNoEdit) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if err != nil {
+			writeInternalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, editResponse(session, s.publicURL(session.ArtifactID)))
 	case http.MethodDelete:
-		if s.live == nil {
-			writeError(w, http.StatusNotImplemented, "live preview is unavailable")
+		sessionID := r.URL.Query().Get("session_id")
+		if sessionID == "" {
+			writeError(w, http.StatusBadRequest, "session_id is required")
 			return
 		}
-		if err := s.live.Stop(artifactID); err != nil {
-			status := http.StatusNotFound
-			if !errors.Is(err, live.ErrNotWatching) {
-				status = http.StatusInternalServerError
-			}
-			writeError(w, status, err.Error())
+		if err := s.edit.Abort(artifactID, sessionID); err != nil {
+			status := statusForEditError(err)
+			writeError(w, status, userError(err))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) editProgress(w http.ResponseWriter, r *http.Request, artifactID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.edit == nil {
+		writeError(w, http.StatusNotImplemented, "editing is unavailable")
+		return
+	}
+	var request protocol.EditProgressRequest
+	if err := decodeJSON(r, w, 16<<10, &request); err != nil || request.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "invalid edit progress request")
+		return
+	}
+	session, err := s.edit.Progress(artifactID, request.SessionID, request.Message)
+	if err != nil {
+		writeError(w, statusForEditError(err), userError(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, editResponse(session, s.publicURL(session.ArtifactID)))
+}
+
+func (s *Server) editCommit(w http.ResponseWriter, r *http.Request, artifactID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.edit == nil {
+		writeError(w, http.StatusNotImplemented, "editing is unavailable")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxPublishBody)
+	staging, err := s.store.NewStaging()
+	if err != nil {
+		writeInternalError(w, err)
+		return
+	}
+	defer func() {
+		if cleanupErr := s.store.RemoveStaging(staging); cleanupErr != nil {
+			slog.Error("removing edit staging directory", "error", cleanupErr)
+		}
+	}()
+	sessionID, baseVersion, sourcePath, err := receiveEditMultipart(r, staging)
+	if err != nil {
+		writeError(w, statusForError(err), userError(err))
+		return
+	}
+	var result registry.PublishResult
+	err = s.edit.Commit(r.Context(), artifactID, sessionID, sourcePath, baseVersion, func() error {
+		var publishErr error
+		result, publishErr = s.store.PublishStagedIfCurrent(r.Context(), staging, sourcePath, baseVersion)
+		return publishErr
+	})
+	if err != nil {
+		writeError(w, statusForEditError(err), userError(err))
+		return
+	}
+	writeJSON(w, http.StatusCreated, protocol.PublishResponse{
+		Artifact: result.Artifact,
+		Version:  result.Version.Number,
+		URL:      s.publicURL(result.Artifact.ID),
+	})
+}
+
+func editResponse(session edit.Session, url string) protocol.EditSessionResponse {
+	return protocol.EditSessionResponse{
+		SessionID:   session.SessionID,
+		ArtifactID:  session.ArtifactID,
+		Directory:   session.Directory,
+		BaseVersion: session.BaseVersion,
+		Status:      string(session.Status),
+		Message:     session.Message,
+		Error:       session.Error,
+		ExpiresAt:   session.ExpiresAt,
+		URL:         url,
+	}
+}
+
+func statusForEditError(err error) int {
+	switch {
+	case errors.Is(err, edit.ErrAlreadyEditing), errors.Is(err, edit.ErrVersionChanged):
+		return http.StatusConflict
+	case errors.Is(err, edit.ErrNoEdit), errors.Is(err, edit.ErrSessionNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, edit.ErrTooManySessions), errors.Is(err, edit.ErrTooManyClients):
+		return http.StatusTooManyRequests
+	case errors.Is(err, edit.ErrArchivedArtifact), errors.Is(err, registry.ErrVersionConflict):
+		return http.StatusConflict
+	default:
+		return statusForError(err)
 	}
 }
 
@@ -193,8 +280,8 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request, artifactID stri
 			writeInternalError(w, err)
 			return
 		}
-		if s.live != nil {
-			if err := s.live.Stop(artifactID); err != nil && !errors.Is(err, live.ErrNotWatching) {
+		if s.edit != nil {
+			if err := s.edit.AbortArtifact(artifactID, "Artifact archived"); err != nil && !errors.Is(err, edit.ErrNoEdit) {
 				writeInternalError(w, err)
 				return
 			}
@@ -227,34 +314,6 @@ func (s *Server) archive(w http.ResponseWriter, r *http.Request, artifactID stri
 	})
 }
 
-func (s *Server) liveInfo(w http.ResponseWriter, r *http.Request, artifactID string) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if s.live == nil {
-		writeError(w, http.StatusNotImplemented, "live preview is unavailable")
-		return
-	}
-	info, err := s.live.Info(artifactID)
-	if errors.Is(err, live.ErrNotWatching) {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	if err != nil {
-		writeInternalError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.LiveResponse{
-		ArtifactID: info.ArtifactID,
-		Directory:  info.Directory,
-		Status:     string(info.Status),
-		Hash:       info.Hash,
-		Error:      info.Error,
-		URL:        s.publicURL(info.ArtifactID),
-	})
-}
-
 func (s *Server) versions(w http.ResponseWriter, r *http.Request, artifactID string) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -282,8 +341,8 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request, artifactID stri
 		writeError(w, http.StatusBadRequest, "invalid restore request")
 		return
 	}
-	if s.live != nil {
-		if err := s.live.Stop(artifactID); err != nil && !errors.Is(err, live.ErrNotWatching) {
+	if s.edit != nil {
+		if err := s.edit.AbortArtifact(artifactID, "Edit canceled for restore"); err != nil && !errors.Is(err, edit.ErrNoEdit) {
 			writeInternalError(w, err)
 			return
 		}
@@ -437,6 +496,111 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 		Version:  result.Version.Number,
 		URL:      s.publicURL(result.Artifact.ID),
 	})
+}
+
+func receiveEditMultipart(r *http.Request, staging string) (string, int, string, error) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return "", 0, "", &RequestError{Message: fmt.Sprintf("reading edit form: %v", err)}
+	}
+	seen := make(map[string]struct{})
+	var sessionID, sourcePath, baseVersionValue string
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", 0, "", &RequestError{Message: fmt.Sprintf("reading edit part: %v", err)}
+		}
+		switch part.FormName() {
+		case "session_id", "base_version", "source_path":
+			if part.FileName() != "" {
+				return "", 0, "", &RequestError{Message: "invalid edit metadata field"}
+			}
+			value, readErr := io.ReadAll(io.LimitReader(part, maxSourcePath+1))
+			closeErr := part.Close()
+			if readErr != nil {
+				return "", 0, "", &RequestError{Message: fmt.Sprintf("reading edit metadata: %v", readErr)}
+			}
+			if closeErr != nil {
+				return "", 0, "", &RequestError{Message: fmt.Sprintf("closing edit metadata: %v", closeErr)}
+			}
+			if len(value) > maxSourcePath {
+				return "", 0, "", &RequestError{Message: "edit metadata is too long"}
+			}
+			switch part.FormName() {
+			case "session_id":
+				if sessionID != "" {
+					return "", 0, "", &RequestError{Message: "duplicate session_id field"}
+				}
+				sessionID = strings.TrimSpace(string(value))
+			case "base_version":
+				if baseVersionValue != "" {
+					return "", 0, "", &RequestError{Message: "duplicate base_version field"}
+				}
+				baseVersionValue = strings.TrimSpace(string(value))
+			case "source_path":
+				if sourcePath != "" {
+					return "", 0, "", &RequestError{Message: "duplicate source path field"}
+				}
+				sourcePath = strings.TrimSpace(string(value))
+			}
+		case "file":
+			if err := receiveFilePart(part, staging, seen); err != nil {
+				return "", 0, "", err
+			}
+		default:
+			return "", 0, "", &RequestError{Message: "unexpected edit field"}
+		}
+	}
+	if sessionID == "" || sourcePath == "" || baseVersionValue == "" {
+		return "", 0, "", &RequestError{Message: "edit session metadata is required"}
+	}
+	if err := protocol.ValidateAbsolutePath(sourcePath); err != nil {
+		return "", 0, "", &RequestError{Message: "source path must be absolute and normalized"}
+	}
+	baseVersion, err := strconv.Atoi(baseVersionValue)
+	if err != nil || baseVersion < 1 {
+		return "", 0, "", &RequestError{Message: "base version must be a positive integer"}
+	}
+	return sessionID, baseVersion, sourcePath, nil
+}
+
+func receiveFilePart(part *multipart.Part, staging string, seen map[string]struct{}) error {
+	name := part.Header.Get("X-Artifact-Path")
+	if name == "" {
+		name = part.FileName()
+	}
+	name, nameErr := safeUploadName(name)
+	if nameErr != nil {
+		return &RequestError{Message: nameErr.Error()}
+	}
+	if _, exists := seen[name]; exists {
+		return &RequestError{Message: fmt.Sprintf("duplicate artifact path: %s", name)}
+	}
+	seen[name] = struct{}{}
+	destination := filepath.Join(staging, filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
+		return fmt.Errorf("creating artifact directory: %w", err)
+	}
+	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	if err != nil {
+		return fmt.Errorf("creating staged file: %w", err)
+	}
+	_, copyErr := io.Copy(file, part)
+	closeErr := file.Close()
+	partCloseErr := part.Close()
+	if copyErr != nil {
+		return fmt.Errorf("writing staged file: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("closing staged file: %w", closeErr)
+	}
+	if partCloseErr != nil {
+		return fmt.Errorf("closing upload part: %w", partCloseErr)
+	}
+	return nil
 }
 
 func receiveMultipart(r *http.Request, staging string) (string, error) {
@@ -594,6 +758,18 @@ func userError(err error) string {
 	var validationErr *manifest.ValidationError
 	if errors.As(err, &validationErr) {
 		return validationErr.Message
+	}
+	if errors.Is(err, registry.ErrVersionConflict) || errors.Is(err, edit.ErrVersionChanged) {
+		return "artifact changed since edit began"
+	}
+	if errors.Is(err, edit.ErrNoEdit) {
+		return "artifact is not being edited"
+	}
+	if errors.Is(err, edit.ErrSessionNotFound) {
+		return "edit session not found"
+	}
+	if errors.Is(err, edit.ErrAlreadyEditing) {
+		return "artifact is already being edited"
 	}
 	return "internal server error"
 }

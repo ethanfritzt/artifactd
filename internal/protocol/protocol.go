@@ -38,17 +38,26 @@ type PublishResponse struct {
 	URL      string         `json:"url"`
 }
 
-type WatchRequest struct {
+type EditBeginRequest struct {
 	Directory string `json:"directory"`
+	Message   string `json:"message,omitempty"`
 }
 
-type LiveResponse struct {
-	ArtifactID string `json:"artifact_id"`
-	Directory  string `json:"directory"`
-	Status     string `json:"status"`
-	Hash       string `json:"hash"`
-	Error      string `json:"error,omitempty"`
-	URL        string `json:"url,omitempty"`
+type EditProgressRequest struct {
+	SessionID string `json:"session_id"`
+	Message   string `json:"message"`
+}
+
+type EditSessionResponse struct {
+	SessionID   string    `json:"session_id"`
+	ArtifactID  string    `json:"artifact_id"`
+	Directory   string    `json:"directory"`
+	BaseVersion int       `json:"base_version"`
+	Status      string    `json:"status"`
+	Message     string    `json:"message,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	URL         string    `json:"url,omitempty"`
 }
 
 type ArtifactResponse struct {

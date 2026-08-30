@@ -3,6 +3,7 @@ package ipc
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -14,7 +15,7 @@ import (
 	"testing"
 
 	"artifactd/internal/create"
-	"artifactd/internal/live"
+	"artifactd/internal/edit"
 	"artifactd/internal/protocol"
 	"artifactd/internal/runtime"
 	"artifactd/internal/storage"
@@ -45,9 +46,9 @@ func TestPublishHandler(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/artifacts/publish", body)
 	request.Header.Set("Content-Type", contentType)
 	recorder := httptest.NewRecorder()
-	liveManager := live.NewManager(store)
-	defer liveManager.Close()
-	server := NewServer(store, func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" }, runtime.NewStore(), liveManager)
+	editManager := edit.NewManager(store)
+	defer editManager.Close()
+	server := NewServer(store, func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" }, runtime.NewStore(), editManager)
 
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
@@ -76,37 +77,39 @@ func TestPublishHandler(t *testing.T) {
 		t.Fatalf("data status = %d, body = %s", dataRecorder.Code, dataRecorder.Body.String())
 	}
 
-	watchBody, err := json.Marshal(protocol.WatchRequest{Directory: source})
+	beginBody, err := json.Marshal(protocol.EditBeginRequest{Directory: source, Message: "Updating demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	watchRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/demo/watch", bytes.NewReader(watchBody))
-	watchRequest.Header.Set("Content-Type", "application/json")
-	watchRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(watchRecorder, watchRequest)
-	if watchRecorder.Code != http.StatusCreated {
-		t.Fatalf("watch status = %d, body = %s", watchRecorder.Code, watchRecorder.Body.String())
+	beginRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/demo/edit", bytes.NewReader(beginBody))
+	beginRequest.Header.Set("Content-Type", "application/json")
+	beginRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(beginRecorder, beginRequest)
+	if beginRecorder.Code != http.StatusCreated {
+		t.Fatalf("begin status = %d, body = %s", beginRecorder.Code, beginRecorder.Body.String())
 	}
-	var watchResponse protocol.LiveResponse
-	if err := json.NewDecoder(watchRecorder.Body).Decode(&watchResponse); err != nil {
+	var session protocol.EditSessionResponse
+	if err := json.NewDecoder(beginRecorder.Body).Decode(&session); err != nil {
 		t.Fatal(err)
 	}
-	if watchResponse.ArtifactID != "demo" || watchResponse.Status != "ready" {
-		t.Fatalf("watch response = %+v", watchResponse)
+	if session.ArtifactID != "demo" || session.Status != "editing" {
+		t.Fatalf("edit response = %+v", session)
 	}
 
-	liveRequest := httptest.NewRequest(http.MethodGet, "/v1/artifacts/demo/live", nil)
-	liveRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(liveRecorder, liveRequest)
-	if liveRecorder.Code != http.StatusOK {
-		t.Fatalf("live status = %d, body = %s", liveRecorder.Code, liveRecorder.Body.String())
+	commitBody, commitType := multipartArtifactWithEdit(t, source, session.SessionID, session.BaseVersion)
+	commitRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/demo/edit/commit", commitBody)
+	commitRequest.Header.Set("Content-Type", commitType)
+	commitRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(commitRecorder, commitRequest)
+	if commitRecorder.Code != http.StatusCreated {
+		t.Fatalf("commit status = %d, body = %s", commitRecorder.Code, commitRecorder.Body.String())
 	}
-
-	unwatchRequest := httptest.NewRequest(http.MethodDelete, "/v1/artifacts/demo/watch", nil)
-	unwatchRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unwatchRecorder, unwatchRequest)
-	if unwatchRecorder.Code != http.StatusNoContent {
-		t.Fatalf("unwatch status = %d, body = %s", unwatchRecorder.Code, unwatchRecorder.Body.String())
+	var commitResponse protocol.PublishResponse
+	if err := json.NewDecoder(commitRecorder.Body).Decode(&commitResponse); err != nil {
+		t.Fatal(err)
+	}
+	if commitResponse.Version != 2 {
+		t.Fatalf("commit response = %+v", commitResponse)
 	}
 }
 
@@ -214,25 +217,25 @@ func TestArchiveHandler(t *testing.T) {
 	body, contentType := multipartArtifact(t, source)
 	publishRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/publish", body)
 	publishRequest.Header.Set("Content-Type", contentType)
-	liveManager := live.NewManager(store)
-	defer liveManager.Close()
-	server := NewServer(store, func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" }, runtime.NewStore(), liveManager)
+	editManager := edit.NewManager(store)
+	defer editManager.Close()
+	server := NewServer(store, func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" }, runtime.NewStore(), editManager)
 	publishRecorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(publishRecorder, publishRequest)
 	if publishRecorder.Code != http.StatusCreated {
 		t.Fatalf("publish status = %d, body = %s", publishRecorder.Code, publishRecorder.Body.String())
 	}
 
-	watchBody, err := json.Marshal(protocol.WatchRequest{Directory: source})
+	beginBody, err := json.Marshal(protocol.EditBeginRequest{Directory: source, Message: "Updating demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	watchRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/demo/watch", bytes.NewReader(watchBody))
-	watchRequest.Header.Set("Content-Type", "application/json")
-	watchRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(watchRecorder, watchRequest)
-	if watchRecorder.Code != http.StatusCreated {
-		t.Fatalf("watch status = %d, body = %s", watchRecorder.Code, watchRecorder.Body.String())
+	beginRequest := httptest.NewRequest(http.MethodPost, "/v1/artifacts/demo/edit", bytes.NewReader(beginBody))
+	beginRequest.Header.Set("Content-Type", "application/json")
+	beginRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(beginRecorder, beginRequest)
+	if beginRecorder.Code != http.StatusCreated {
+		t.Fatalf("begin status = %d, body = %s", beginRecorder.Code, beginRecorder.Body.String())
 	}
 
 	archiveRecorder := httptest.NewRecorder()
@@ -249,11 +252,11 @@ func TestArchiveHandler(t *testing.T) {
 		t.Fatal("archive response has no archive timestamp")
 	}
 
-	liveRequest := httptest.NewRequest(http.MethodGet, "/v1/artifacts/demo/live", nil)
-	liveRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(liveRecorder, liveRequest)
-	if liveRecorder.Code != http.StatusNotFound {
-		t.Fatalf("live status after archive = %d, want 404", liveRecorder.Code)
+	editRequest := httptest.NewRequest(http.MethodGet, "/v1/artifacts/demo/edit", nil)
+	editRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(editRecorder, editRequest)
+	if editRecorder.Code != http.StatusNotFound {
+		t.Fatalf("edit status after archive = %d, want 404", editRecorder.Code)
 	}
 
 	listRecorder := httptest.NewRecorder()
@@ -288,6 +291,60 @@ func TestArchiveHandler(t *testing.T) {
 	if unarchiveResponse.Artifact.ArchivedAt != nil {
 		t.Fatal("unarchive response still has archive timestamp")
 	}
+}
+
+func multipartArtifactWithEdit(t *testing.T, source, sessionID string, baseVersion int) (io.Reader, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("session_id", sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("base_version", fmt.Sprint(baseVersion)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("source_path", source); err != nil {
+		t.Fatal(err)
+	}
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+			"name": "file", "filename": filepath.Base(relative),
+		}))
+		header.Set("Content-Type", "application/octet-stream")
+		header.Set("X-Artifact-Path", filepath.ToSlash(relative))
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			return err
+		}
+		content, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(part, content)
+		closeErr := content.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &body, writer.FormDataContentType()
 }
 
 func multipartArtifact(t *testing.T, source string) (io.Reader, string) {

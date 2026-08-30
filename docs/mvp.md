@@ -72,8 +72,8 @@ The MVP is ready for dogfooding when a user can:
 2. Run `artifact create --id demo` and receive an automatically published scaffold.
 3. Edit the generated static files in the returned managed source directory.
 4. Optionally pass `--open` to launch the initial URL in the default browser.
-5. Run `artifact watch demo` to preview valid edits with a loading overlay during refresh.
-6. Run `artifact publish demo` for an explicit durable checkpoint.
+5. Run `artifact edit begin demo`, edit the source, and commit with `artifact edit commit demo --session <session-id>`; the browser shows the editing overlay and refreshes after publication.
+6. Confirm a failed commit leaves the previous immutable version served.
 7. Run `artifact list` and see the published artifact.
 8. Publish a changed directory with the same ID and create a new version.
 9. Archive an artifact, confirm it is hidden from the active library, then unarchive it.

@@ -32,23 +32,17 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("creating storage root: %w", err)
 	}
 
-	// Live snapshots and publish staging are disposable. Cleaning both on
-	// startup bounds abandoned data after a process crash. The managed-path
-	// checks make this cleanup safe even if the data directory was tampered
-	// with between runs.
-	liveRoot := filepath.Join(root, "live")
+	// Publish staging is disposable. Cleaning it on startup bounds abandoned
+	// data after a process crash. The managed-path check makes this cleanup
+	// safe even if the data directory was tampered with between runs.
 	stagingRoot := filepath.Join(root, "staging")
-	for _, dir := range []string{liveRoot, stagingRoot} {
-		if err := removeManagedDirectory(root, dir); err != nil {
-			return nil, fmt.Errorf("cleaning storage directory: %w", err)
-		}
+	if err := removeManagedDirectory(root, stagingRoot); err != nil {
+		return nil, fmt.Errorf("cleaning storage directory: %w", err)
 	}
 	for _, dir := range []string{
 		filepath.Join(root, "sources"),
 		filepath.Join(root, "artifacts"),
 		stagingRoot,
-		liveRoot,
-		filepath.Join(liveRoot, ".staging"),
 	} {
 		if err := ensureDirectory(root, dir); err != nil {
 			return nil, fmt.Errorf("creating storage directory: %w", err)
@@ -77,10 +71,6 @@ func (s *Store) Close() error {
 
 func (s *Store) StageDirectory(source string) (string, error) {
 	return s.stageDirectory(source, filepath.Join(s.root, "staging"))
-}
-
-func (s *Store) StageLiveDirectory(source string) (string, error) {
-	return s.stageDirectory(source, filepath.Join(s.root, "live", ".staging"))
 }
 
 func (s *Store) stageDirectory(source, stagingRoot string) (string, error) {
@@ -209,82 +199,6 @@ func copyRegularFile(source, target string, limit int64) error {
 	return nil
 }
 
-func (s *Store) CreateLiveSnapshot(source string) (string, manifest.Manifest, string, error) {
-	staging, err := s.StageLiveDirectory(source)
-	if err != nil {
-		return "", manifest.Manifest{}, "", err
-	}
-	keepStaging := false
-	defer func() {
-		if !keepStaging {
-			_ = s.RemoveStaging(staging)
-		}
-	}()
-
-	currentManifest, _, err := manifest.ValidateDirectory(staging)
-	if err != nil {
-		return "", manifest.Manifest{}, "", err
-	}
-	hash, err := contentHash(staging)
-	if err != nil {
-		return "", manifest.Manifest{}, "", fmt.Errorf("hashing live artifact: %w", err)
-	}
-	path, err := s.CommitLiveSnapshot(staging, currentManifest.ID)
-	if err != nil {
-		return "", manifest.Manifest{}, "", err
-	}
-	keepStaging = true
-	return path, currentManifest, hash, nil
-}
-
-func (s *Store) CommitLiveSnapshot(staging, artifactID string) (string, error) {
-	if !manifest.ValidID(artifactID) {
-		return "", fmt.Errorf("invalid live artifact ID")
-	}
-	if err := s.validateStagingPath(staging, filepath.Join(s.root, "live", ".staging")); err != nil {
-		return "", err
-	}
-	liveRoot := filepath.Join(s.root, "live")
-	snapshots := filepath.Join(liveRoot, artifactID, "snapshots")
-	if err := ensureDirectory(s.root, snapshots); err != nil {
-		return "", fmt.Errorf("creating live snapshot directory: %w", err)
-	}
-	finalPath, err := os.MkdirTemp(snapshots, "snapshot-")
-	if err != nil {
-		return "", fmt.Errorf("allocating live snapshot path: %w", err)
-	}
-	if err := os.Remove(finalPath); err != nil {
-		return "", fmt.Errorf("preparing live snapshot path: %w", err)
-	}
-	if err := os.Rename(staging, finalPath); err != nil {
-		return "", fmt.Errorf("moving live snapshot: %w", err)
-	}
-	return finalPath, nil
-}
-
-func (s *Store) RemoveLiveSnapshot(snapshot string) error {
-	liveRoot := filepath.Join(s.root, "live")
-	absolute, err := filepath.Abs(snapshot)
-	if err != nil {
-		return fmt.Errorf("resolving live snapshot: %w", err)
-	}
-	relative, err := filepath.Rel(liveRoot, absolute)
-	if err != nil || relative == "." || relative == "" || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) || filepath.IsAbs(relative) {
-		return fmt.Errorf("live snapshot is outside storage")
-	}
-	parts := strings.Split(filepath.ToSlash(relative), "/")
-	if len(parts) != 3 || !manifest.ValidID(parts[0]) || parts[1] != "snapshots" || !strings.HasPrefix(parts[2], "snapshot-") {
-		return fmt.Errorf("invalid live snapshot path")
-	}
-	if err := rejectSymlinkComponents(s.root, absolute); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(absolute); err != nil {
-		return fmt.Errorf("removing live snapshot: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) NewStaging() (string, error) {
 	return s.newStaging(filepath.Join(s.root, "staging"))
 }
@@ -312,7 +226,6 @@ func (s *Store) RemoveStaging(path string) error {
 	}
 	for _, root := range []string{
 		filepath.Join(s.root, "staging"),
-		filepath.Join(s.root, "live", ".staging"),
 	} {
 		if err := s.validateStagingPath(path, root); err == nil {
 			if err := rejectSymlinkComponents(s.root, path); err != nil {
@@ -328,6 +241,14 @@ func (s *Store) RemoveStaging(path string) error {
 }
 
 func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (registry.PublishResult, error) {
+	return s.publishStaged(ctx, staging, sourcePath, 0)
+}
+
+func (s *Store) PublishStagedIfCurrent(ctx context.Context, staging, sourcePath string, expectedVersion int) (registry.PublishResult, error) {
+	return s.publishStaged(ctx, staging, sourcePath, expectedVersion)
+}
+
+func (s *Store) publishStaged(ctx context.Context, staging, sourcePath string, expectedVersion int) (registry.PublishResult, error) {
 	if err := s.validateStagingPath(staging, filepath.Join(s.root, "staging")); err != nil {
 		return registry.PublishResult{}, err
 	}
@@ -350,7 +271,20 @@ func (s *Store) PublishStaged(ctx context.Context, staging, sourcePath string) (
 		}
 	}
 
-	result, err := s.registry.Publish(ctx, m, raw, hash, workspaceID, func(version int, relativePath string) (func() error, error) {
+	publish := s.registry.Publish
+	if expectedVersion > 0 {
+		publish = func(
+			ctx context.Context,
+			m manifest.Manifest,
+			rawManifest []byte,
+			contentHash string,
+			workspaceID string,
+			install registry.InstallVersion,
+		) (registry.PublishResult, error) {
+			return s.registry.PublishIfCurrent(ctx, m, rawManifest, contentHash, workspaceID, expectedVersion, install)
+		}
+	}
+	result, err := publish(ctx, m, raw, hash, workspaceID, func(version int, relativePath string) (func() error, error) {
 		finalPath, err := s.resolve(relativePath)
 		if err != nil {
 			return nil, err

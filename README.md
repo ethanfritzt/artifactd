@@ -67,13 +67,13 @@ Current capabilities:
 - a small `artifact.json` manifest
 - standalone static artifacts
 - dependency-free HTML, CSS, and JavaScript scaffolding via `artifact create --id <id>`
-- `artifact create`, `publish`, `list`, `archive`, `unarchive`, `watch`, `live`, `unwatch`, `versions`, and `restore` (`create` auto-publishes; `--open` launches the result)
+- `artifact create`, `publish`, `list`, `archive`, `unarchive`, `edit`, `versions`, and `restore` (`create` auto-publishes; `--open` launches the result)
 - Go `artifactd` daemon with JSON-over-Unix-socket IPC
 - SQLite-backed metadata registry
 - filesystem-backed immutable versions
 - artifact-specific localhost origins
 - scoped workspace filesystem metadata
-- live system metrics, agent-pushed JSON data, and opt-in agent editing with automatic browser refresh
+- live system metrics, agent-pushed JSON data, and transactional agent editing with automatic browser refresh
 - a documented shell-first integration for agents
 
 Future versions may add thumbnails, permanent artifact purge, and state-preserving HMR.
@@ -118,16 +118,18 @@ Start the daemon, create an artifact, open its initial preview, and list it:
 `artifact create` stores editable source outside the current repository, under
 Artifactd's managed data directory. Use `--path ./demo --id demo` when a
 repository-local source directory is intentional. Existing directory paths
-remain supported by `publish` and `watch`.
+remain supported by `publish`.
 
-Create publishes the generated static files immediately. Keep the preview current while editing with:
+Create publishes the generated static files immediately. For an edit, begin a transaction before changing files and commit it when the complete source is ready:
 
 ```bash
 source_dir="$(artifact create --id my-tool)"
-artifact watch my-tool
+artifact edit begin my-tool --message "Building the tool"
+# edit files in "$source_dir"
+artifact edit commit my-tool --session <session-id>
 ```
 
-The live preview refreshes after valid edits and shows a blurred loading overlay while a new snapshot is being assembled. Use `artifact publish my-tool` for an explicit durable checkpoint.
+The browser shows a loading overlay during the transaction and refreshes after the validated immutable version is published.
 
 Published artifacts are served at `http://<id>.artifacts.localhost:7337/`. The default Artifactd Home library is available at `http://artifacts.localhost:7337/`. Legacy path URLs remain available and redirect at the artifact root.
 
