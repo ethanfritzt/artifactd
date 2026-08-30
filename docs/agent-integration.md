@@ -30,7 +30,8 @@ An integration should encourage agents to:
 - avoid embedding secrets or private credentials in published files
 - publish only the intended directory
 - report the resulting URL clearly
-- publish updates to the existing artifact instead of creating duplicates
+- use `artifact edit commit` for coordinated updates and `artifact publish` for direct checkpoints
+- update the existing artifact ID instead of creating duplicates
 
 ## Agent guidance
 
@@ -73,15 +74,15 @@ After `artifact create` has published the initial scaffold, begin a session befo
 
 ```bash
 artifact edit begin demo --message "Redesigning the dashboard" --output json
-# keep the returned session_id
+# keep the returned session_id and edit the returned managed source directory
 artifact edit progress demo --session <session-id> --message "Finishing responsive styles"
 artifact edit commit demo --session <session-id>
 ```
 
-The begin command tells Artifactd and the browser that editing has started. Pi can then write the managed source files normally. Artifactd does not watch intermediate filesystem changes and never serves an incomplete source tree. Commit validates and publishes exactly one immutable version, then the browser reloads the stable URL. If validation fails, the previous version remains served and the session can be retried. Abort an abandoned session with:
+The begin command tells Artifactd and the browser that editing has started. Pi can then write the managed source files normally, but must keep the manifest ID unchanged and send progress for edits lasting longer than five minutes. Artifactd does not watch intermediate filesystem changes and never serves an incomplete source tree. Commit validates and publishes exactly one immutable version, then the browser reloads the stable URL. If validation fails, the previous version remains served and the session can be retried. Abort an abandoned session with:
 
 ```bash
-artifact edit abort demo --session "$session_id"
+artifact edit abort demo --session <session-id>
 ```
 
 Sessions expire after inactivity. The protocol is agent-agnostic: Pi, another shell-capable agent, or a human can use the same commands.

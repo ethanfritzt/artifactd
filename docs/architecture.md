@@ -86,6 +86,7 @@ The CLI uses Cobra and Viper for flags, environment variables, and optional conf
 ```text
 GET  /v1/health
 GET  /v1/artifacts[?include_archived=true]
+GET  /v1/artifacts/{id}
 POST /v1/artifacts/publish
 GET  /v1/workspaces
 POST /v1/workspaces
@@ -103,9 +104,12 @@ DELETE /v1/artifacts/{id}/archive
 
 The browser listener exposes only artifact content, scoped runtime reads, and edit events. HTML receives a daemon-owned loading overlay: it blurs the published page while an editing session is active, then refreshes after validation. It does not expose registry mutation endpoints. For non-home HTML entrypoints, it also adds daemon-owned library navigation at response time; this platform chrome is not stored in artifact versions.
 
-These endpoints are available only over a Unix domain socket at `$XDG_RUNTIME_DIR/artifactd.sock` when that directory exists. The socket is restricted to the current user.
+These endpoints are available only over a Unix domain socket. The default is
+`$XDG_RUNTIME_DIR/artifactd.sock` when `XDG_RUNTIME_DIR` is set, otherwise
+`<data-dir>/artifactd.sock`. The socket is restricted to the current user;
+`--socket` or `ARTIFACTD_SOCKET` can override it.
 
-The browser HTTP server listens only on `127.0.0.1:7337` by default and exposes artifact content plus scoped runtime data. Control endpoints remain isolated on the Unix socket.
+The browser HTTP server listens only on `127.0.0.1:7337` by default and exposes artifact content plus scoped runtime data. Control endpoints remain isolated on the Unix socket. Both listeners can be configured with `host`/`port` settings; published URLs use `public-host`.
 
 ## Registry and storage
 
@@ -124,7 +128,7 @@ SQLite stores artifact metadata, archive state, current version numbers, version
             └── 2/
 ```
 
-Versions are immutable. A publish is staged, validated, moved into its final version directory atomically, and registered in an immediate SQLite write transaction. An edit session records an agent-owned source directory and base version, displays progress through browser events, and publishes one complete validated package on commit. Intermediate source files are never served; a stale base version is rejected.
+Versions are immutable. A publish is staged, validated, moved into its final version directory atomically, and registered in an immediate SQLite write transaction. An edit session records an agent-owned source directory and base version, displays progress through browser events, and publishes one complete validated package on commit. Intermediate source files are never served; a stale base version is rejected. Edit sessions use a five-minute inactivity lease and are not persisted.
 
 SQLite uses WAL mode, foreign keys, a busy timeout, strict tables, parameterized queries, and indexes for registry lookups.
 
@@ -162,4 +166,4 @@ The daemon runs in the foreground initially:
 artifactd
 ```
 
-A systemd user service can supervise it later. The primary deployment is native Go binaries; Docker is not required.
+A systemd user service template is provided for optional supervision. The primary deployment is native Go binaries; Docker is not required.

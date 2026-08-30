@@ -4,13 +4,13 @@
 
 ![Artifactd Home library](docs/images/artifactd-home.png)
 
-**Status: pre-alpha / workspace runtime implementation.** The repository contains the Go CLI, daemon, SQLite registry, immutable filesystem version store, workspace providers, artifact runtime data APIs, and dependency-free static artifact authoring.
+**Status: MVP implemented; pre-alpha.** The repository contains the Go CLI, daemon, SQLite registry, immutable filesystem version store, workspace providers, artifact runtime data APIs, transactional editing, and dependency-free static artifact authoring.
 
 ## Why artifactd?
 
-CLI agents can create useful software quickly, but the result usually ends up as a file that users must find, host, and remember how to reopen. `artifactd` is intended to give those generated tools a durable local home.
+CLI agents can create useful software quickly, but the result usually ends up as a file that users must find, host, and remember how to reopen. `artifactd` gives those generated tools a durable local home.
 
-An agent—or a human—should be able to publish a standalone interactive artifact and get a stable local URL:
+An agent—or a human—can publish a standalone interactive artifact and get a stable local URL:
 
 ```text
 artifact publish house-budget
@@ -25,7 +25,7 @@ The artifact remains available in a local library until it is archived. Archivin
 
 `artifactd` is **not** an AI agent, IDE, deployment platform, or hosted application service. Agents such as Pi, Claude Code, Codex, and OpenCode create artifacts; `artifactd` stores, versions, serves, and organizes them.
 
-The initial direction is deliberately local-first:
+The current runtime is deliberately local-first:
 
 - zero account and zero cloud dependency
 - standalone HTML, CSS, JavaScript, and SVG artifacts
@@ -33,7 +33,7 @@ The initial direction is deliberately local-first:
 - stable local URLs and a CLI-managed artifact registry
 - workspace-scoped filesystem data and read-only system metrics
 
-## Proposed workflow
+## Workflow
 
 ```text
 CLI agent or human
@@ -41,26 +41,25 @@ CLI agent or human
         ▼
 artifact create --id artifact-id
         │
-        ├── editable source under ~/.local/share/artifactd/sources/
+        ├── editable source under Artifactd's managed data directory
         └── initial scaffold published automatically
         │
         ▼
-artifactd stores an immutable version
+artifact edit begin → ordinary source edits → artifact edit commit
         │
-        ├── stable URL
-        ├── registry metadata
-        ├── version history
-        └── library entry
+        └── complete source is validated and published as one new version
         │
         ▼
-http://artifacts.localhost/my-artifact
+http://artifact-id.artifacts.localhost:7337/
 ```
 
-Publishing the same artifact again should update its existing entry and create a new version rather than overwrite history. Archived artifacts remain archived until explicitly unarchived.
+Publishing the same artifact again updates its existing entry and creates a new
+immutable version rather than overwriting history. Archived artifacts remain
+archived until explicitly unarchived.
 
-## MVP
+## Current MVP
 
-The first release should answer one question: **does it feel valuable when an agent-generated tool permanently exists in a local library?**
+The current MVP answers one question: **does it feel valuable when an agent-generated tool permanently exists in a local library?**
 
 Current capabilities:
 
@@ -76,44 +75,46 @@ Current capabilities:
 - live system metrics, agent-pushed JSON data, and transactional agent editing with automatic browser refresh
 - a documented shell-first integration for agents
 
-Future versions may add thumbnails, permanent artifact purge, and state-preserving HMR.
-
-The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node runtimes, cloud hosting, authentication, collaboration, and a plugin marketplace. See [MVP scope](docs/mvp.md).
+The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node runtimes, cloud hosting, authentication, collaboration, plugin marketplaces, permanent artifact purge, and state-preserving HMR.
 
 ## Documentation
 
-- [Project vision](docs/vision.md) — the user problem, product philosophy, and intended experience
-- [MVP scope](docs/mvp.md) — milestones, acceptance criteria, and explicit non-goals
-- [Architecture](docs/architecture.md) — runtime boundaries and data flow
+- [Architecture](docs/architecture.md) — implemented runtime boundaries and data flow
 - [Protocol](docs/protocol.md) — CLI-to-daemon API
-- [Artifact specification](docs/artifact-spec.md) — versioned artifact metadata and packaging
-- [Artifact format](docs/artifact-format.md) — manifest and packaging conventions
+- [Artifact specification](docs/artifact-spec.md) — versioned artifact metadata and packaging conventions
 - [Security model](docs/security.md) — threat model and constraints for generated content
 - [Agent integration](docs/agent-integration.md) — shell-first integration and future directions
 - [Default artifact](default/) — the built-in library starter/template artifact
 - [Roadmap](docs/roadmap.md) — staged evolution beyond the MVP
-- [Development](docs/development.md) — build and test commands
+- [Development](docs/development.md) — build, install, and test commands
+- [Configuration](docs/configuration.md) — flags, environment variables, paths, and defaults
 - [Artifact authoring](docs/authoring.md) — raw HTML, CSS, and JavaScript workflows
 - [Contributing](CONTRIBUTING.md) — how to contribute while the project is still being shaped
+- [Developer handoff](docs/developer-handoff.md) — implementation invariants, verification, and known limitations
 
-These documents describe the current pre-alpha API and implementation boundaries. Runtime providers are intentionally narrow while the core interaction is validated.
+These documents describe the current pre-alpha API and implementation boundaries. Runtime providers are intentionally narrow, while publishing and transactional editing are implemented.
 
 ## Quick start
 
 Build the two native Linux binaries:
 
 ```bash
-go build -o artifact ./cmd/artifact
-go build -o artifactd ./cmd/artifactd
+make build
 ```
 
 Start the daemon, create an artifact, open its initial preview, and list it:
 
 ```bash
-./artifactd &
-./artifact create --id demo --open
-./artifact list
+./bin/artifactd &
+./bin/artifact create --id demo --open
+./bin/artifact list
 ```
+
+The defaults use `$XDG_DATA_HOME/artifactd` (or
+`~/.local/share/artifactd`) for data, a user-local Unix socket, and
+`127.0.0.1:7337` for browser traffic. See
+[Configuration](docs/configuration.md) to change these locations or use
+`ARTIFACTD_*` environment variables.
 
 `artifact create` stores editable source outside the current repository, under
 Artifactd's managed data directory. Use `--path ./demo --id demo` when a
@@ -123,10 +124,10 @@ remain supported by `publish`.
 Create publishes the generated static files immediately. For an edit, begin a transaction before changing files and commit it when the complete source is ready:
 
 ```bash
-source_dir="$(artifact create --id my-tool)"
-artifact edit begin my-tool --message "Building the tool"
-# edit files in "$source_dir"
-artifact edit commit my-tool --session <session-id>
+source_dir="$(./bin/artifact create --id my-tool)"
+./bin/artifact edit begin my-tool --message "Building the tool" --output json
+# record the returned session_id, then edit files in "$source_dir"
+./bin/artifact edit commit my-tool --session <session-id>
 ```
 
 The browser shows a loading overlay during the transaction and refreshes after the validated immutable version is published.

@@ -1,74 +1,46 @@
 # Roadmap
 
-This roadmap is directional. The project should advance based on whether the core publish-and-reopen experience is useful, not on completing every possible platform feature.
+The local static-artifact MVP is implemented. Future work should be driven by
+dogfooding the publish–reopen and agent-editing loops rather than by adding
+platform complexity prematurely.
 
-## Phase 0 — Validate the model
-
-- documentation-first project definition
-- settle the smallest manifest and lifecycle vocabulary
-- collect example artifacts and dogfooding scenarios
-- identify the browser isolation model before implementation
-
-## Phase 1 — MVP runtime
+## Current baseline
 
 - static artifact validation and publishing
-- `artifact create`, `artifact publish`, and `artifact list`
-- local registry and immutable versions
+- local SQLite registry and immutable filesystem versions
 - JSON-over-Unix-socket CLI protocol
-- stable path-based URLs with artifact-specific runtime origins
 - foreground daemon with separate control and browser listeners
-- terminal-friendly and JSON output
-- native Linux binaries
+- artifact-specific localhost origins and legacy path compatibility
+- named workspaces with read-only filesystem metadata
+- system metrics and agent-pushed JSON runtime data
+- transactional source editing with browser status events and refresh after commit
+- dependency-free static authoring scaffold
+- Artifactd Home library artifact
+- CLI version listing, restore, archive, and unarchive operations
 
-## Phase 2 — Workspace runtime
+## Next priorities
 
-- named workspace roots and artifact associations
-- artifact-specific localhost origins
-- read-only system and filesystem providers
-- live runtime data channels
-- agent-pushed JSON snapshots and updates
-- transactional source editing sessions with browser status events and refresh after commit
+- dogfood with Pi and other shell-capable agents
+- improve the Artifactd Home library UI
+- expose version browsing and restore in the library
+- add visual cards, thumbnails, search, and pinning
+- add provenance and predictable update confirmation
+- improve setup and supervised deployment ergonomics
 
-## Phase 3 — Artifact authoring and library
-
-- versioned artifact specification with runtime metadata
-- dependency-free static web authoring scaffold
-- direct static artifact publishing and transactional preview editing
-- design guidance and reliable artifact states
-- `artifacts.localhost` library
-- visual cards and metadata
-- search and pinning
-- thumbnails
-- version browsing and restore actions (CLI baseline is available; library UI remains future work)
-- polished empty, error, and loading states
-
-## Phase 4 — Agent integrations
-
-- agent integration guidance and examples
-- examples for other shell-capable agents
-- provenance fields where useful
-- predictable update behavior
-
-## Phase 5 — Actions and state
+## Later possibilities
 
 - persistent artifact state separate from code
 - mediated file writes and authenticated actions
 - agent callbacks and structured action requests
-- stronger trust handling for imported artifacts
-- validated SDK surface
-
-## Later possibilities
-
 - richer static authoring helpers
-- agent bridge and interactive actions
+- state-preserving HMR with an explicit runtime contract
 - typed artifact outputs and composition
-- provenance and semantic search
-- desktop `.desktop` entries
-- state-preserving HMR for future authoring helpers with an explicit runtime contract
 - fork/eject workflows
 - optional sharing and remote runtimes
-- open artifact protocol specification
+- desktop integration and an open artifact protocol specification
 
 ## Explicitly not a near-term goal
 
-The project should not become an IDE, general deployment platform, cloud service, or unrestricted execution environment before the local static-artifact loop proves its value.
+The project should not become an IDE, general deployment platform, cloud
+service, or unrestricted execution environment before the local artifact loop
+proves its value.

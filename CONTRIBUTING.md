@@ -1,6 +1,6 @@
 # Contributing
 
-`artifactd` is in the pre-alpha Phase 1 implementation stage. Contributions that clarify the publish workflow, reduce MVP scope, or expose important security and usability questions are especially welcome.
+`artifactd` is a working pre-alpha MVP. Contributions that improve the publish and editing workflows, preserve the small MVP boundary, or expose important security and usability questions are especially welcome.
 
 ## Before implementation
 
@@ -30,4 +30,4 @@ Avoid introducing implementation scaffolding solely for speculative features. Th
 3. Update the relevant documentation first.
 4. Keep implementation changes separate from design exploration when possible.
 
-The implementation can be built and tested with `make build` and `make test`. Keep changes focused on the Phase 1 CLI, daemon, storage, IPC, and static-serving workflow.
+The implementation can be built and tested with `make build` and `make test`. For the current transactional-editing boundary, invariants, and known limitations, see [Developer handoff](docs/developer-handoff.md). Keep changes focused on the current CLI, daemon, storage, IPC, and static-serving workflow.

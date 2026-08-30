@@ -41,7 +41,26 @@ Successful response:
 }
 ```
 
-Publishing an existing ID creates the next immutable version and updates the current version. Publishing does not implicitly unarchive an artifact.
+Publishing an existing ID creates the next immutable version and updates the current version. Publishing does not implicitly unarchive an artifact. Publish requests are limited to 50 MiB and 1,000 regular files; invalid manifests, symlinks, special files, and unsafe paths are rejected.
+
+## Get an artifact
+
+Fetch the current artifact metadata and version:
+
+```text
+GET /v1/artifacts/{id}
+```
+
+The response has the same artifact and version fields as the publish response,
+plus the current entry path:
+
+```json
+{
+  "artifact": {"id":"demo","current_version":2},
+  "version":2,
+  "entry":"index.html"
+}
+```
 
 ## Archive
 
@@ -72,13 +91,13 @@ Begin request:
 {"directory":"/home/user/project/demo","message":"Redesigning the dashboard"}
 ```
 
-The directory must contain a valid artifact with the requested stable ID and an existing published version. The daemon returns an opaque session ID and the immutable base version:
+The directory must contain a valid artifact with the requested stable ID and an existing published version. Keep the manifest ID unchanged until commit. The daemon returns an opaque session ID and the immutable base version:
 
 ```json
 {"session_id":"edit-...","artifact_id":"demo","base_version":66,"status":"editing","expires_at":"..."}
 ```
 
-The agent may edit the source directory normally. Those intermediate files are never served. Progress messages renew the session lease and are presented by the browser overlay. Commit is a multipart request containing `session_id`, `base_version`, `source_path`, and the complete artifact file set. The daemon validates the complete package and publishes exactly one immutable version only if the base version is still current.
+The agent may edit the source directory normally. Those intermediate files are never served. Progress messages renew the five-minute inactivity lease and are presented by the browser overlay; long-running edits must send progress before the lease expires. Commit is a multipart request containing `session_id`, `base_version`, `source_path`, and the complete artifact file set. The daemon validates the complete package and publishes exactly one immutable version only if the base version is still current. The source path must match the session's canonical directory; it is not trusted as a workspace claim.
 
 The browser-only endpoint emits Server-Sent Events:
 
@@ -99,7 +118,7 @@ Events have the form:
 {"type":"edit_expired","artifact_id":"demo","session_id":"edit-..."}
 ```
 
-The injected browser client displays the old published version under a loading overlay during the session and reloads once after a successful commit. Invalid packages leave the previous published version unchanged. Sessions are in-memory, expire after inactivity, and end when aborted, committed, or the daemon shuts down.
+The injected browser client displays the old published version under a loading overlay during the session and reloads once after a successful commit. Invalid packages leave the previous published version unchanged. Sessions are in-memory, expire after five minutes without activity, and end when aborted, committed, or the daemon shuts down. Begin and commit return `201 Created`; progress and status return `200 OK`; abort returns `204 No Content`. A stale base version or concurrent edit returns `409 Conflict`.
 
 ## Versions and restore
 
@@ -181,4 +200,4 @@ Errors use a stable JSON shape:
 {"error":"human-readable error"}
 ```
 
-The CLI converts transport and daemon errors into non-zero Unix exit codes.
+The CLI converts transport and daemon errors into non-zero Unix exit codes. Requests use the stable `{"error":"..."}` JSON shape; a missing artifact or edit session is `404 Not Found`, malformed input is `400 Bad Request`, and oversized publish or commit uploads are `413 Request Entity Too Large`.

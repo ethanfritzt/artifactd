@@ -14,14 +14,14 @@ The runtime serves HTML, CSS, JavaScript, assets, and narrow local data APIs. It
 
 Local installation does not make generated code trusted.
 
-## Initial constraints
+## Current constraints
 
-The runtime should:
+The runtime:
 
 - keep published artifact files immutable
 - provide only typed, read-only system and workspace data providers
 - provide no arbitrary shell, process-control, or package-install capability
-- keep registry mutation and agent data-push APIs on the Unix socket
+- keep registry mutation, transactional edit, and agent data-push APIs on the Unix socket
 - avoid exposing control-plane APIs to artifact pages
 - validate paths and prevent traversal outside an artifact version or workspace root
 - define symlink handling explicitly
@@ -31,7 +31,7 @@ The runtime should:
 - reject non-canonical URL paths, traversal segments, symlinks, and directory listings when serving snapshots
 - document the trust model prominently
 
-A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases; artifact-specific origins are validated from the configured host suffix. The exact origin and browser isolation strategy therefore require deliberate design.
+A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases. The current browser isolation model uses artifact-specific origins validated from the configured host suffix, restrictive response headers, and a same-origin CSP; any expansion of that model requires a new threat-model review.
 
 ## Workspace and provider model
 
@@ -41,7 +41,12 @@ Read-only providers expose narrow data: system metrics, process summaries, and w
 
 Workspace access is still a security boundary. Imported or untrusted artifacts must not automatically inherit access merely because they are copied into a workspace. Writes, secrets, process control, and command execution require separate mediation.
 
-## Security questions before implementation
+Transactional editing is also a control-plane operation. The browser may observe
+edit status and events, but it cannot begin, progress, commit, or abort a
+session. Intermediate source files are never served; only a complete validated
+package can become an immutable version.
+
+## Open security questions before expansion
 
 - How should workspace trust be represented for imported artifacts?
 - Should each artifact receive a unique origin, or can path-based routing be made safe enough?
