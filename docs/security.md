@@ -4,7 +4,7 @@ Generated artifacts are code. Even a local-first runtime should assume that an a
 
 ## MVP threat model
 
-The runtime serves HTML, CSS, JavaScript, assets, and narrow local data APIs. It should assume:
+The runtime serves HTML, rendered Markdown, CSS, JavaScript, assets, and narrow local data APIs. It should assume:
 
 - an artifact can execute arbitrary JavaScript in its browser context
 - an artifact may contain unsafe or deceptive UI
@@ -29,9 +29,12 @@ The runtime:
 - use restrictive browser headers and a clear content security policy where practical
 - accept browser routes only for the configured library host or a validated artifact subdomain
 - reject non-canonical URL paths, traversal segments, symlinks, and directory listings when serving snapshots
+- render Markdown with raw HTML disabled, dangerous URL filtering, and a 5 MiB document limit
+- keep temporary Markdown previews bounded, in memory, absent from the registry, and unavailable within one hour or after daemon shutdown
+- upload only the explicitly selected preview file rather than implicitly publishing adjacent files
 - document the trust model prominently
 
-A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases. The current browser isolation model uses artifact-specific origins validated from the configured host suffix, restrictive response headers, and a same-origin CSP; any expansion of that model requires a new threat-model review.
+A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases. The current browser isolation model uses artifact-specific origins validated from the configured host suffix, restrictive response headers, and a same-origin CSP. That CSP also prevents rendered Markdown from automatically loading remote images. External links remain user-initiated browser navigation. Any expansion of this model requires a new threat-model review.
 
 ## Workspace and provider model
 

@@ -1,6 +1,6 @@
 # Artifact authoring
 
-Artifactd's canonical authoring path is a dependency-free static web directory containing HTML, CSS, JavaScript, and relative assets. Artifactd supplies global library navigation at runtime for every non-home HTML artifact, so source files should not add a duplicate back-to-library control.
+Artifactd's canonical authoring path is a dependency-free static web directory containing HTML, CSS, JavaScript, Markdown, and relative assets. Artifactd supplies global library navigation at runtime for every non-home HTML or Markdown artifact, so source files should not add a duplicate back-to-library control.
 
 ## Create an artifact
 
@@ -24,6 +24,31 @@ app.js
 ```
 
 Edit those files directly. Before a multi-file change, run `artifact edit begin my-tool --message "Updating the artifact"`; the browser shows a loading overlay while the session is active. Run `artifact edit commit my-tool --session <session-id>` when the complete source is ready. Failed validation leaves the previous immutable version served, and no dependency installation or build step is required.
+
+## Markdown
+
+Use a Markdown file as `code.entry` when an artifact is primarily a document:
+
+```json
+{
+  "specVersion": 1,
+  "artifact": {"id": "project-notes", "name": "Project Notes"},
+  "code": {"format": "files", "entry": "README.md"},
+  "runtime": {"id": "web-static", "version": 1}
+}
+```
+
+Artifactd renders `.md` and `.markdown` files with GitHub-flavored tables, task lists, fenced code blocks, autolinks, and strikethrough. Raw HTML is disabled. Relative links to packaged Markdown documents and same-origin images retain their normal browser behavior.
+
+For a file that should not become a durable library artifact, create an in-memory preview that lasts up to one hour:
+
+```bash
+artifact preview ./README.md --open
+```
+
+The preview uploads only the selected Markdown file, does not read or publish its parent directory, does not appear in the artifact library, and expires automatically. Assets are intentionally not collected by this initial preview workflow.
+
+On Linux, `artifact integration install` registers **Artifactd Markdown Preview** in the **Open With** menu used by GNOME Files and other MIME-aware file managers. It does not change the user's default Markdown application.
 
 ## Static data and runtime providers
 

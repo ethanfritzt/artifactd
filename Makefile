@@ -34,6 +34,7 @@ install: build
 	install -d $(HOME)/.local/share/artifactd/default
 	rm -rf $(HOME)/.local/share/artifactd/default/*
 	cp -a default/artifact.json default/index.html default/styles.css default/app.js $(HOME)/.local/share/artifactd/default/
+	$(HOME)/.local/bin/artifact integration install
 
 clean:
 	rm -rf bin coverage.out

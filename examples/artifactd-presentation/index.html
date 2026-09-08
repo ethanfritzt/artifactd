@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f1e9">
+  <title>Artifactd — A home for agent-built artifacts</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="deck" id="deck" aria-roledescription="slide deck" aria-label="Artifactd presentation">
+    <header class="deck-chrome">
+      <div class="brand" aria-label="Artifactd presentation">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span>artifactd</span>
+      </div>
+      <div class="deck-meta">
+        <span class="deck-topic">A local home for agent-built software</span>
+        <span class="slide-count" id="slide-count">01 / 06</span>
+      </div>
+    </header>
+
+    <div class="slides" id="slides">
+      <section class="slide slide-cover" data-title="Introduction" aria-labelledby="slide-1-title">
+        <div class="slide-inner cover-layout">
+          <div class="cover-copy">
+            <p class="eyebrow"><span class="eyebrow-dot"></span> FIELD NOTE / 01</p>
+            <h1 id="slide-1-title">Artifacts,<br><em>with a home.</em></h1>
+            <p class="lede">Artifactd is a local-first runtime that gives agent-created browser tools a durable home — with a stable URL, version history, and a place to come back to.</p>
+            <div class="cover-tags" aria-label="Artifactd properties">
+              <span>Linux-native</span><span>Local-first</span><span>Agent-agnostic</span>
+            </div>
+          </div>
+          <div class="cover-visual" aria-label="A preview of an artifactd local URL">
+            <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+            <div class="artifact-window">
+              <div class="window-bar"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span><span class="window-title">artifactd / local runtime</span></div>
+              <div class="window-body">
+                <div class="terminal-line"><span class="prompt">$</span> artifact create <b>my-tool</b></div>
+                <div class="terminal-line muted">publishing standalone artifact…</div>
+                <div class="terminal-rule"></div>
+                <div class="url-line"><span class="pulse"></span><span>http://my-tool.<b>artifacts.localhost</b>:7337/</span></div>
+                <div class="window-status"><span>●</span> available in your library <small>v.04</small></div>
+              </div>
+            </div>
+            <div class="pin pin-top">01 <span>create</span></div>
+            <div class="pin pin-bottom">02 <span>return to it</span></div>
+          </div>
+        </div>
+        <div class="slide-foot"><span>Artifactd / a short tour</span><span>Press → to begin</span></div>
+      </section>
+
+      <section class="slide" data-title="The problem" aria-labelledby="slide-2-title" hidden>
+        <div class="slide-inner problem-layout">
+          <div class="section-intro">
+            <p class="eyebrow"><span class="eyebrow-number">02</span> THE PROBLEM</p>
+            <h2 id="slide-2-title">The artifact is useful.<br><em>The context is not.</em></h2>
+            <p class="section-lede">Claude can make a beautiful, connector-powered view. But the useful thing is still tied to where it was made.</p>
+          </div>
+          <div class="problem-stage">
+            <div class="context-stack" aria-label="The current artifact flow is tied to Claude Desktop">
+              <div class="context-source"><span class="source-icon">C</span><div><strong>Claude Desktop</strong><small>conversation + connectors</small></div><span class="lock-mark" aria-label="tied to">⌁</span></div>
+              <div class="connector-line"><span></span><span></span><span></span></div>
+              <div class="context-view"><div class="mini-toolbar"><span></span><span></span><span></span><b>artifact view</b></div><div class="mini-chart"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="mini-label">nice view / narrow doorway</div></div>
+            </div>
+            <div class="problem-note"><span class="note-mark">!</span><p><strong>On Linux, the doorway is closed.</strong><br>Without Claude Desktop, there is no obvious place to open, revisit, or maintain the view.</p></div>
+            <ul class="problem-list">
+              <li><span>01</span> The view disappears into the conversation</li>
+              <li><span>02</span> There is no durable local URL or library</li>
+              <li><span>03</span> The creation loop stops at “looks good”</li>
+            </ul>
+          </div>
+        </div>
+        <div class="slide-foot"><span>From conversational output</span><span class="accent-text">to something you can keep</span></div>
+      </section>
+
+      <section class="slide" data-title="The solution" aria-labelledby="slide-3-title" hidden>
+        <div class="slide-inner solution-layout">
+          <div class="section-intro split-intro">
+            <div><p class="eyebrow"><span class="eyebrow-number">03</span> THE SOLUTION</p><h2 id="slide-3-title">Treat generated tools<br><em>like services.</em></h2></div>
+            <p class="section-lede">Inspired by systemd: small, dependable units with a known place to live. Artifactd applies that idea to agent-made browser tools.</p>
+          </div>
+          <div class="pipeline" aria-label="Artifactd creation and serving pipeline">
+            <div class="pipeline-step step-agent"><div class="step-icon">✦</div><span class="step-kicker">01 / MAKE</span><h3>Agent or human</h3><p>Describe the tool. Iterate on the source.</p><code>artifact create</code></div>
+            <div class="pipeline-arrow" aria-hidden="true">→</div>
+            <div class="pipeline-step step-store"><div class="step-icon">⌘</div><span class="step-kicker">02 / KEEP</span><h3>Source + versions</h3><p>Every commit is a complete, immutable checkpoint.</p><code>v1 → v2 → v3</code></div>
+            <div class="pipeline-arrow" aria-hidden="true">→</div>
+            <div class="pipeline-step step-daemon"><div class="step-icon">◉</div><span class="step-kicker">03 / SERVE</span><h3>artifactd daemon</h3><p>A small local runtime, ready when you are.</p><code>localhost:7337</code></div>
+            <div class="pipeline-arrow" aria-hidden="true">→</div>
+            <div class="pipeline-step step-browser"><div class="step-icon">↗</div><span class="step-kicker">04 / OPEN</span><h3>Browser artifact</h3><p>One stable URL. One local library.</p><code>my-tool.artifacts.localhost</code></div>
+          </div>
+          <div class="solution-caption"><span class="caption-rule"></span><strong>Not a hosted app platform.</strong> A durable local home for the things agents help you make.</div>
+        </div>
+      </section>
+
+      <section class="slide spec-slide" data-title="Artifact specification" aria-labelledby="slide-4-title" hidden>
+        <div class="slide-inner spec-layout">
+          <div class="section-intro split-intro">
+            <div><p class="eyebrow"><span class="eyebrow-number">04</span> ARTIFACT SPEC</p><h2 id="slide-4-title">The contract is small.<br><em>That's the point.</em></h2></div>
+            <p class="section-lede">For developers, an artifact is deliberately familiar: a directory of static files, a tiny manifest, and a publish step.</p>
+          </div>
+          <div class="spec-board" aria-label="Artifact specification and publish flow">
+            <div class="spec-source">
+              <div class="spec-heading"><span class="file-glyph">{ }</span><div><b>artifact.json</b><small>the manifest</small></div><span class="spec-badge">spec v1</span></div>
+              <pre><span class="json-brace">{</span>
+  <span class="json-key">"artifact"</span>: <span class="json-value">{ "id": "my-tool" }</span>,
+  <span class="json-key">"code"</span>: <span class="json-value">{ "format": "files",</span>
+    <span class="json-value">"entry": "index.html" }</span>,
+  <span class="json-key">"runtime"</span>: <span class="json-value">"web-static"</span>
+<span class="json-brace">}</span></pre>
+              <div class="source-files"><span>index.html</span><span>styles.css</span><span>app.js</span><span>assets/</span></div>
+            </div>
+            <div class="spec-publish">
+              <div class="publish-step"><span>01</span><div><b>Create the source</b><code>artifact create --id my-tool</code></div></div>
+              <div class="publish-arrow" aria-hidden="true">↓</div>
+              <div class="publish-step"><span>02</span><div><b>Publish a version</b><code>artifact publish ./my-tool</code></div></div>
+              <div class="publish-arrow" aria-hidden="true">↓</div>
+              <div class="publish-step serve-step"><span>03</span><div><b>Serve over HTTP</b><code>http://my-tool.artifacts.localhost:7337/</code></div></div>
+            </div>
+          </div>
+          <div class="spec-caption"><span class="caption-rule"></span><strong>Static in the artifact.</strong> Durable in Artifactd. The daemon stores versions and serves the browser view.</div>
+        </div>
+        <div class="slide-foot"><span>One small contract, many useful tools</span><span class="accent-text">Next: examples</span></div>
+      </section>
+
+      <section class="slide examples-slide" data-title="Examples" aria-labelledby="slide-5-title" hidden>
+        <div class="slide-inner examples-layout">
+          <div class="section-intro examples-intro"><div><p class="eyebrow"><span class="eyebrow-number">05</span> EXAMPLES</p><h2 id="slide-5-title">A library,<br><em>not a folder.</em></h2></div><p class="section-lede">These are real standalone tools already living at stable local URLs — each made for a different job.</p></div>
+          <div class="gallery-wrap"><div class="gallery-kicker"><span class="pulse"></span> 04 ARTIFACTS / CURRENTLY PUBLISHED</div>
+          <div class="example-gallery" aria-label="Screenshots of existing Artifactd artifacts">
+            <figure class="example-shot shot-large"><a class="example-link" href="http://top-lite.artifacts.localhost:7337/" target="_blank" rel="noopener" aria-label="Open top-lite artifact"><img src="assets/top.png" alt="Top Lite system monitor artifact showing live Linux metrics"></a><figcaption><b>top-lite</b><span>live system activity ↗</span></figcaption></figure>
+            <figure class="example-shot"><a class="example-link" href="http://book-tracker-dashboard.artifacts.localhost:7337/" target="_blank" rel="noopener" aria-label="Open Book Tracker Dashboard artifact"><img src="assets/book.png" alt="Book Tracker Dashboard showing reading status and a table of books"></a><figcaption><b>book tracker</b><span>personal reading dashboard ↗</span></figcaption></figure>
+            <figure class="example-shot"><a class="example-link" href="http://nfl-auction-draft-co-pilot.artifacts.localhost:7337/" target="_blank" rel="noopener" aria-label="Open NFL Auction Draft Co-Pilot artifact"><img src="assets/nfl.png" alt="NFL Auction Draft Co-Pilot showing a fantasy football draft board"></a><figcaption><b>draft co-pilot</b><span>live decision support ↗</span></figcaption></figure>
+            <figure class="example-shot"><a class="example-link" href="http://vault-relational-atlas.artifacts.localhost:7337/" target="_blank" rel="noopener" aria-label="Open Vault Relational Atlas artifact"><img src="assets/atlas.png" alt="Vault Relational Atlas showing connected vault documents"></a><figcaption><b>relational atlas</b><span>explore explicit links ↗</span></figcaption></figure>
+          </div></div>
+        </div>
+        <div class="slide-foot"><span>Real artifacts, same local runtime</span><span>Next: live demo</span></div>
+      </section>
+
+      <section class="slide next-slide" data-title="Next steps" aria-labelledby="slide-6-title" hidden>
+        <div class="slide-inner next-layout">
+          <div class="section-intro split-intro">
+            <div><p class="eyebrow"><span class="eyebrow-number">06</span> NEXT STEPS</p><h2 id="slide-6-title">Make the home feel<br><em>as useful as the tools.</em></h2></div>
+            <p class="section-lede">The MVP proves the local artifact loop. Next, we make discovery, trust, and recovery feel just as effortless.</p>
+          </div>
+          <div class="next-list" aria-label="Planned user-facing features">
+            <article class="next-item"><span class="next-number">01</span><div><h3>Find the right artifact faster</h3><p>Visual cards, thumbnails, search, and pinning in Artifactd Home.</p></div><span class="next-word">DISCOVER</span></article>
+            <article class="next-item"><span class="next-number">02</span><div><h3>See what changed — and why</h3><p>Provenance details and predictable update confirmation before a new version lands.</p></div><span class="next-word">TRUST</span></article>
+            <article class="next-item"><span class="next-number">03</span><div><h3>Browse history without the CLI</h3><p>Version browsing and one-click restore for durable checkpoints.</p></div><span class="next-word">REWIND</span></article>
+            <article class="next-item"><span class="next-number">04</span><div><h3>Make setup feel invisible</h3><p>Clearer first-run guidance and better supervised deployment ergonomics.</p></div><span class="next-word">SMOOTH</span></article>
+          </div>
+          <div class="next-principle"><span class="caption-rule"></span><strong>Keep the boundary.</strong> Local-first, static, agent-agnostic.</div>
+        </div>
+        <div class="slide-foot"><span>Artifactd / the roadmap after “it works”</span><span>End of deck</span></div>
+      </section>
+    </div>
+
+    <nav class="deck-controls" aria-label="Presentation controls">
+      <button class="nav-button" id="prev" type="button" aria-label="Previous slide">←</button>
+      <div class="progress" id="progress" role="tablist" aria-label="Slides"></div>
+      <button class="nav-button" id="next" type="button" aria-label="Next slide">→</button>
+      <button class="fullscreen-button" id="fullscreen" type="button" aria-label="Toggle fullscreen">⛶ <span>fullscreen</span></button>
+    </nav>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

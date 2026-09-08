@@ -78,6 +78,7 @@ func NewCommand() *cobra.Command {
 	}
 	root.AddCommand(
 		createCommand(app),
+		previewCommand(app),
 		listCommand(app),
 		publishCommand(app),
 		workspaceCommand(app),
@@ -87,6 +88,7 @@ func NewCommand() *cobra.Command {
 		restoreCommand(app),
 		archiveCommand(app),
 		unarchiveCommand(app),
+		integrationCommand(app),
 	)
 	return root
 }

@@ -75,7 +75,7 @@ artifact archive <artifact-id>
 artifact unarchive <artifact-id>
 ```
 
-`create` writes a dependency-free HTML/CSS/JavaScript artifact scaffold into Artifactd's managed `sources/<artifact-id>/` directory by default, keeping the current repository untouched, and automatically publishes the initial scaffold when the daemon is available. Use `--path <directory>` for an explicit repository-local source. `publish` and edit commands accept either a source directory or a managed artifact ID. `list` requests metadata from the daemon and formats it for humans or scripts; archived artifacts are omitted unless `--include-archived` is used.
+`create` writes a dependency-free HTML/CSS/JavaScript artifact scaffold into Artifactd's managed `sources/<artifact-id>/` directory by default, keeping the current repository untouched, and automatically publishes the initial scaffold when the daemon is available. Use `--path <directory>` for an explicit repository-local source. `publish` and edit commands accept either a source directory or a managed artifact ID. `preview` uploads one Markdown file into a bounded, one-hour in-memory preview that is not registered as an artifact. `list` requests metadata from the daemon and formats it for humans or scripts; archived artifacts are omitted unless `--include-archived` is used.
 
 The CLI uses Cobra and Viper for flags, environment variables, and optional configuration. Results go to stdout; diagnostics go to stderr. `artifact create` generates the dependency-free static scaffold directly.
 
@@ -85,6 +85,7 @@ The CLI uses Cobra and Viper for flags, environment variables, and optional conf
 
 ```text
 GET  /v1/health
+POST /v1/previews
 GET  /v1/artifacts[?include_archived=true]
 GET  /v1/artifacts/{id}
 POST /v1/artifacts/publish
@@ -102,7 +103,7 @@ POST /v1/artifacts/{id}/archive
 DELETE /v1/artifacts/{id}/archive
 ```
 
-The browser listener exposes only artifact content, scoped runtime reads, and edit events. HTML receives a daemon-owned loading overlay: it blurs the published page while an editing session is active, then refreshes after validation. It does not expose registry mutation endpoints. For non-home HTML entrypoints, it also adds daemon-owned library navigation at response time; this platform chrome is not stored in artifact versions.
+The browser listener exposes only artifact content, temporary preview content, scoped runtime reads, and edit events. Published Markdown is rendered server-side with raw HTML disabled, a 5 MiB rendering limit, and a daemon-owned stylesheet; nested Markdown routes preserve relative URL resolution. HTML and durable Markdown receive a daemon-owned loading overlay that blurs the published page while an editing session is active, then refreshes after validation. Temporary previews receive navigation but no editing controls. The browser does not expose registry mutation or preview-creation endpoints. For non-home HTML and Markdown entrypoints, it adds daemon-owned library navigation at response time; this platform chrome is not stored in artifact versions.
 
 These endpoints are available only over a Unix domain socket. The default is
 `$XDG_RUNTIME_DIR/artifactd.sock` when `XDG_RUNTIME_DIR` is set, otherwise
@@ -128,7 +129,7 @@ SQLite stores artifact metadata, archive state, current version numbers, version
             └── 2/
 ```
 
-Versions are immutable. A publish is staged, validated, moved into its final version directory atomically, and registered in an immediate SQLite write transaction. An edit session records an agent-owned source directory and base version, displays progress through browser events, and publishes one complete validated package on commit. Intermediate source files are never served; a stale base version is rejected. Edit sessions use a five-minute inactivity lease and are not persisted.
+Versions are immutable. A publish is staged, validated, moved into its final version directory atomically, and registered in an immediate SQLite write transaction. An edit session records an agent-owned source directory and base version, displays progress through browser events, and publishes one complete validated package on commit. Intermediate source files are never served; a stale base version is rejected. Edit sessions use a five-minute inactivity lease and are not persisted. Temporary Markdown previews are held separately in bounded daemon memory and disappear on expiration or daemon shutdown.
 
 SQLite uses WAL mode, foreign keys, a busy timeout, strict tables, parameterized queries, and indexes for registry lookups.
 

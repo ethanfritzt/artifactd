@@ -64,8 +64,9 @@ The current MVP answers one question: **does it feel valuable when an agent-gene
 Current capabilities:
 
 - a small `artifact.json` manifest
-- standalone static artifacts
+- standalone static artifacts, including rendered Markdown entrypoints
 - dependency-free HTML, CSS, and JavaScript scaffolding via `artifact create --id <id>`
+- temporary Markdown viewing via `artifact preview <file> --open`
 - `artifact create`, `publish`, `list`, `archive`, `unarchive`, `edit`, `versions`, and `restore` (`create` auto-publishes; `--open` launches the result)
 - Go `artifactd` daemon with JSON-over-Unix-socket IPC
 - SQLite-backed metadata registry
@@ -88,7 +89,7 @@ The MVP intentionally excludes AI chat, an IDE, arbitrary shell access, Node run
 - [Roadmap](docs/roadmap.md) — staged evolution beyond the MVP
 - [Development](docs/development.md) — build, install, and test commands
 - [Configuration](docs/configuration.md) — flags, environment variables, paths, and defaults
-- [Artifact authoring](docs/authoring.md) — raw HTML, CSS, and JavaScript workflows
+- [Artifact authoring](docs/authoring.md) — HTML, CSS, JavaScript, and Markdown workflows
 - [Contributing](CONTRIBUTING.md) — how to contribute while the project is still being shaped
 - [Developer handoff](docs/developer-handoff.md) — implementation invariants, verification, and known limitations
 
@@ -107,6 +108,7 @@ Start the daemon, create an artifact, open its initial preview, and list it:
 ```bash
 ./bin/artifactd &
 ./bin/artifact create --id demo --open
+./bin/artifact preview ./README.md --open
 ./bin/artifact list
 ```
 
@@ -133,6 +135,14 @@ source_dir="$(./bin/artifact create --id my-tool)"
 The browser shows a loading overlay during the transaction and refreshes after the validated immutable version is published.
 
 Published artifacts are served at `http://<id>.artifacts.localhost:7337/`. The default Artifactd Home library is available at `http://artifacts.localhost:7337/`. Legacy path URLs remain available and redirect at the artifact root.
+
+On Linux, add Artifactd to GNOME Files and other MIME-aware file managers without changing the default Markdown application:
+
+```bash
+./bin/artifact integration install
+```
+
+Markdown files then offer **Artifactd Markdown Preview** under **Open With**. Remove the entry with `artifact integration uninstall`.
 
 ## Design principles
 

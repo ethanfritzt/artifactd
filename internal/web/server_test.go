@@ -10,6 +10,7 @@ import (
 
 	"artifactd/internal/create"
 	"artifactd/internal/edit"
+	"artifactd/internal/preview"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
 	"artifactd/internal/runtime"
@@ -222,6 +223,85 @@ func TestServerServesEditRuntime(t *testing.T) {
 	}
 }
 
+func TestServerRendersMarkdownArtifact(t *testing.T) {
+	store, err := OpenTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			t.Logf("closing test store: %v", closeErr)
+		}
+	}()
+	publishMarkdownArtifact(t, store)
+
+	server := newTestServer(store)
+	entryBody := requestMarkdown(t, server, "/").Body.String()
+	requestMarkdown(t, server, "/docs/more.md")
+	if strings.Contains(entryBody, "<script>alert('xss')</script>") {
+		t.Fatal("raw Markdown HTML was served")
+	}
+	for _, wanted := range []string{`<h1 id="notes">Notes</h1>`, "data-artifactd-edit-overlay", "data-artifactd-navigation"} {
+		if !strings.Contains(entryBody, wanted) {
+			t.Fatalf("rendered Markdown does not contain %q", wanted)
+		}
+	}
+
+	headRecorder := requestArtifact(t, server, http.MethodHead, "/")
+	if headRecorder.Body.Len() != 0 {
+		t.Fatalf("HEAD response has %d body bytes", headRecorder.Body.Len())
+	}
+}
+
+func TestServerServesTemporaryMarkdownPreview(t *testing.T) {
+	store, err := OpenTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	previewManager := preview.NewManager()
+	document, err := previewManager.Create("notes.md", []byte("# Temporary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(
+		store,
+		"artifacts.localhost",
+		func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" },
+		"artifactd-home",
+		runtime.NewStore(),
+		system.NewProvider(),
+		filesystem.NewProvider(),
+		nil,
+	)
+	server.SetPreviewManager(previewManager)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Host = document.ID + ".artifacts.localhost"
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "<h1") {
+		t.Fatalf("preview response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "data-artifactd-edit-overlay") {
+		t.Fatal("temporary preview contained artifact editing controls")
+	}
+	if !strings.Contains(recorder.Body.String(), "data-artifactd-navigation") {
+		t.Fatal("temporary preview did not contain library navigation")
+	}
+	if got := recorder.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("preview Referrer-Policy = %q", got)
+	}
+
+	cssRecorder := httptest.NewRecorder()
+	cssRequest := httptest.NewRequest(http.MethodGet, "/_artifactd/markdown.css", nil)
+	cssRequest.Host = document.ID + ".artifacts.localhost"
+	server.Handler().ServeHTTP(cssRecorder, cssRequest)
+	if cssRecorder.Code != http.StatusOK || !strings.Contains(cssRecorder.Body.String(), ".artifactd-markdown") {
+		t.Fatalf("Markdown stylesheet response = %d %s", cssRecorder.Code, cssRecorder.Body.String())
+	}
+}
+
 func TestServerRejectsUnknownArtifact(t *testing.T) {
 	store, err := OpenTestStore(t)
 	if err != nil {
@@ -268,8 +348,70 @@ func TestServerRejectsUntrustedHost(t *testing.T) {
 	}
 }
 
+func requestMarkdown(t *testing.T, server *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := requestArtifact(t, server, http.MethodGet, path)
+	if got := recorder.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
+		t.Fatalf("GET %s Content-Type = %q", path, got)
+	}
+	if !strings.Contains(recorder.Body.String(), "/_artifactd/markdown.css") {
+		t.Fatalf("GET %s did not use the Markdown stylesheet", path)
+	}
+	return recorder
+}
+
+func requestArtifact(t *testing.T, server *Server, method, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, path, nil)
+	request.Host = "notes.artifacts.localhost"
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s %s status = %d", method, path, recorder.Code)
+	}
+	return recorder
+}
+
+func publishMarkdownArtifact(t *testing.T, store *storage.Store) {
+	t.Helper()
+	source := t.TempDir()
+	manifest := `{"specVersion":1,"artifact":{"id":"notes","name":"Notes"},"code":{"format":"files","entry":"README.md"},"runtime":{"id":"web-static","version":1}}`
+	if err := os.WriteFile(filepath.Join(source, "artifact.json"), []byte(manifest), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	markdown := "# Notes\n\n- [x] rendered\n\n<script>alert('xss')</script>"
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte(markdown), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(source, "docs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "docs", "more.md"), []byte("## More"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	staging, err := store.NewStaging()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := copyForWebTest(source, staging); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishStaged(t.Context(), staging, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newTestServer(store *storage.Store) *Server {
-	return NewServer(store, "artifacts.localhost", func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" }, "demo", runtime.NewStore(), system.NewProvider(), filesystem.NewProvider(), nil)
+	return NewServer(
+		store,
+		"artifacts.localhost",
+		func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" },
+		"demo",
+		runtime.NewStore(),
+		system.NewProvider(),
+		filesystem.NewProvider(),
+		nil,
+	)
 }
 
 func OpenTestStore(t *testing.T) (*storage.Store, error) {

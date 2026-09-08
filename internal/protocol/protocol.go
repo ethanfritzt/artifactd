@@ -38,6 +38,13 @@ type PublishResponse struct {
 	URL      string         `json:"url"`
 }
 
+type PreviewResponse struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type EditBeginRequest struct {
 	Directory string `json:"directory"`
 	Message   string `json:"message,omitempty"`

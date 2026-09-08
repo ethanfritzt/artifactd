@@ -11,7 +11,7 @@ watching with transactional editing sessions.
   is a separate localhost HTTP listener.
 - Published artifacts are validated static directories. Each successful
   publish is copied into an immutable filesystem version and recorded in
-  SQLite.
+  SQLite. Markdown files are rendered on request with raw HTML disabled.
 - `artifact create` creates a managed source directory under `sources/` and
   auto-publishes its initial scaffold when the daemon is available.
 - `artifact edit begin` registers one in-memory session for an artifact.
@@ -30,8 +30,10 @@ watching with transactional editing sessions.
   current published version unchanged.
 - `archive`, `restore`, and daemon shutdown terminate active edit sessions as
   appropriate; restore never writes back into the agent's source directory.
-- Browser routes are read-only. Registry mutations and runtime data pushes stay
-  on the Unix socket.
+- Browser routes are read-only. Registry mutations, runtime data pushes, and
+  temporary preview creation stay on the Unix socket.
+- Temporary Markdown previews contain one explicitly uploaded file, remain in
+  bounded daemon memory, expire after at most one hour, and never enter the registry.
 - Publish and edit commit enforce the existing path, symlink, special-file,
   file-count, and size validation rules.
 
@@ -69,6 +71,8 @@ environment settings.
 - Edit sessions are not persisted and cannot resume after a daemon restart.
 - The library UI does not yet expose version browsing or restore controls;
   those operations remain CLI/API functionality.
+- Temporary Markdown previews do not collect relative images or linked files;
+  publish a Markdown artifact directory when those assets are needed.
 - The runtime is intentionally static and local. It does not run Node,
   package installation, arbitrary commands, or backend processes.
 

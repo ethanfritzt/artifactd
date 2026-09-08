@@ -16,6 +16,7 @@ import (
 	"artifactd/internal/config"
 	"artifactd/internal/edit"
 	"artifactd/internal/ipc"
+	"artifactd/internal/preview"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
 	"artifactd/internal/registry"
@@ -60,26 +61,32 @@ func (d *Daemon) Run(ctx context.Context) error {
 	dataStore := runtime.NewStore()
 	editManager := edit.NewManager(d.store)
 	defer editManager.Close()
+	previewManager := preview.NewManager()
+	defer previewManager.Close()
+	controlHandler := ipc.NewServer(d.store, publicURL, dataStore, editManager)
+	controlHandler.SetPreviewManager(previewManager)
 	controlServer := &http.Server{
-		Handler:           ipc.NewServer(d.store, publicURL, dataStore, editManager).Handler(),
+		Handler:           controlHandler.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	browserHandler := web.NewServer(
+		d.store,
+		d.config.PublicHost,
+		publicURL,
+		defaultArtifactID,
+		dataStore,
+		system.NewProvider(),
+		filesystem.NewProvider(),
+		editManager,
+	)
+	browserHandler.SetPreviewManager(previewManager)
 	browserServer := &http.Server{
-		Addr: net.JoinHostPort(d.config.Host, fmt.Sprint(d.config.Port)),
-		Handler: web.NewServer(
-			d.store,
-			d.config.PublicHost,
-			publicURL,
-			defaultArtifactID,
-			dataStore,
-			system.NewProvider(),
-			filesystem.NewProvider(),
-			editManager,
-		).Handler(),
+		Addr:              net.JoinHostPort(d.config.Host, fmt.Sprint(d.config.Port)),
+		Handler:           browserHandler.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		// SSE edit-event connections are intentionally long-lived.

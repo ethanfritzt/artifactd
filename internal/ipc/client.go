@@ -21,6 +21,7 @@ import (
 
 	"artifactd/internal/manifest"
 	"artifactd/internal/model"
+	"artifactd/internal/preview"
 	"artifactd/internal/protocol"
 )
 
@@ -221,6 +222,43 @@ func (c *Client) Publish(ctx context.Context, directory string) (protocol.Publis
 		return protocol.PublishResponse{}, fmt.Errorf("decoding publish response: %w", err)
 	}
 	return result, nil
+}
+
+func (c *Client) Preview(ctx context.Context, path string) (protocol.PreviewResponse, error) {
+	name, content, err := preview.LoadFile(path)
+	if err != nil {
+		return protocol.PreviewResponse{}, err
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", name)
+	if err != nil {
+		return protocol.PreviewResponse{}, fmt.Errorf("creating preview upload: %w", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		return protocol.PreviewResponse{}, fmt.Errorf("writing preview upload: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return protocol.PreviewResponse{}, fmt.Errorf("closing preview upload: %w", err)
+	}
+
+	var response protocol.PreviewResponse
+	if err := c.doJSONWithContentType(
+		ctx,
+		http.MethodPost,
+		"/v1/previews",
+		&body,
+		writer.FormDataContentType(),
+		&response,
+	); err != nil {
+		var daemonErr *DaemonError
+		if errors.As(err, &daemonErr) && daemonErr.StatusCode == http.StatusNotFound {
+			return protocol.PreviewResponse{}, fmt.Errorf("creating Markdown preview: artifactd is running an older version; restart artifactd: %w", err)
+		}
+		return protocol.PreviewResponse{}, err
+	}
+	return response, nil
 }
 
 func (c *Client) AddWorkspace(ctx context.Context, id, root string) (model.Workspace, error) {

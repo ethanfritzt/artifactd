@@ -31,11 +31,13 @@ Install binaries and the raw default artifact into the user data directory:
 make install
 ```
 
-This installs `artifact` and `artifactd` in `~/.local/bin` and copies the
-repository's default artifact to `~/.local/share/artifactd/default`. Ensure
-`~/.local/bin` is on `PATH`, or invoke the binaries by their full path.
+This installs `artifact` and `artifactd` in `~/.local/bin`, copies the
+repository's default artifact to `~/.local/share/artifactd/default`, and
+registers Artifactd as an optional Markdown application in the user's Linux
+desktop MIME database. Ensure `~/.local/bin` is on `PATH`, or invoke the
+binaries by their full path.
 
-Artifacts in this repository are standalone HTML, CSS, and JavaScript files. The daemon serves them directly and never runs Node, installs packages, or executes application builds.
+Artifacts in this repository are standalone HTML, Markdown, CSS, and JavaScript files. The daemon serves regular assets directly, renders Markdown itself, and never runs Node, installs packages, or executes application builds.
 
 The daemon runs in the foreground during development. When started from the repository root, it discovers the raw default artifact under `default/` automatically:
 
@@ -53,6 +55,7 @@ For a smoke test, use a second terminal:
 
 ```bash
 artifact create --id demo --open
+artifact preview ./README.md --open
 artifact list
 artifact edit begin demo --message "Testing the edit flow" --output json
 # edit ~/.local/share/artifactd/sources/demo/ files

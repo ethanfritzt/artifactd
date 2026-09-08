@@ -16,6 +16,7 @@ import (
 
 	"artifactd/internal/create"
 	"artifactd/internal/edit"
+	"artifactd/internal/preview"
 	"artifactd/internal/protocol"
 	"artifactd/internal/runtime"
 	"artifactd/internal/storage"
@@ -110,6 +111,51 @@ func TestPublishHandler(t *testing.T) {
 	}
 	if commitResponse.Version != 2 {
 		t.Fatalf("commit response = %+v", commitResponse)
+	}
+}
+
+func TestPreviewHandler(t *testing.T) {
+	previewManager := preview.NewManager()
+	server := NewServer(
+		nil,
+		func(id string) string { return "http://" + id + ".artifacts.localhost:7337/" },
+		nil,
+		nil,
+	)
+	server.SetPreviewManager(previewManager)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("# Preview")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/previews", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response protocol.PreviewResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.ID == "" || response.Name != "README.md" || response.URL == "" {
+		t.Fatalf("response = %+v", response)
+	}
+	document, err := previewManager.Get(response.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(document.Content) != "# Preview" {
+		t.Fatalf("preview content = %q", document.Content)
 	}
 }
 

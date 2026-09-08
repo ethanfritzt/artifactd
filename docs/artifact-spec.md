@@ -41,7 +41,7 @@ The `code` block describes the packaged files:
 - `format` is currently `files`.
 - `entry` is a normalized relative path to the browser entry document.
 
-The canonical authoring form is dependency-free HTML, CSS, JavaScript, and relative static assets. Artifactd serves the files directly and does not run a build or package runtime.
+The canonical authoring form is dependency-free HTML, CSS, JavaScript, Markdown, and relative static assets. Artifactd serves regular assets directly and renders `.md` and `.markdown` documents to HTML without running a build or package runtime. Raw HTML in Markdown is disabled.
 
 ### Runtime
 
@@ -69,10 +69,10 @@ my-artifact/
 └── app.js
 ```
 
-Additional regular static assets may be referenced by relative paths. Artifactd validates local paths, rejects symlinks and special files, and does not install dependencies or run authoring builds.
+Additional regular static assets may be referenced by relative paths. Markdown entrypoints can link to other packaged Markdown files and same-origin images with relative URLs; directly requested Markdown files are rendered with the same daemon-owned stylesheet. Artifactd validates local paths, rejects symlinks and special files, and does not install dependencies or run authoring builds.
 
 An agent-facing JSON envelope may eventually contain inline text files or references to assets. The directory package remains the canonical publish format for the initial runtime.
 
 ## Export
 
-Artifactd artifacts are standalone web applications and can be served as static web files outside Artifactd. The package does not depend on a frontend framework or a framework-specific runtime.
+HTML-entry artifacts are standalone web applications and can be served as static web files outside Artifactd. Markdown-entry packages remain portable source documents, but another static host needs its own Markdown renderer or a pre-rendered HTML export to reproduce Artifactd's browser presentation. Neither form depends on a frontend framework or package runtime.

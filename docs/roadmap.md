@@ -15,6 +15,8 @@ platform complexity prematurely.
 - system metrics and agent-pushed JSON runtime data
 - transactional source editing with browser status events and refresh after commit
 - dependency-free static authoring scaffold
+- server-rendered Markdown artifacts and temporary Markdown previews
+- Linux Markdown MIME integration for GNOME Files and other file managers
 - Artifactd Home library artifact
 - CLI version listing, restore, archive, and unarchive operations
 
@@ -37,7 +39,7 @@ platform complexity prematurely.
 - typed artifact outputs and composition
 - fork/eject workflows
 - optional sharing and remote runtimes
-- desktop integration and an open artifact protocol specification
+- broader desktop integration and an open artifact protocol specification
 
 ## Explicitly not a near-term goal
 

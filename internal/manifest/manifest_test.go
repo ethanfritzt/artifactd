@@ -19,6 +19,11 @@ func TestValidateDirectory(t *testing.T) {
 			entry:    "index.html",
 		},
 		{
+			name:     "valid Markdown artifact",
+			manifest: `{"specVersion":1,"artifact":{"id":"notes","name":"Notes"},"code":{"format":"files","entry":"README.md"},"runtime":{"id":"web-static","version":1}}`,
+			entry:    "README.md",
+		},
+		{
 			name:     "missing id",
 			manifest: `{"artifactVersion":1,"name":"Demo","entry":"index.html"}`,
 			entry:    "index.html",

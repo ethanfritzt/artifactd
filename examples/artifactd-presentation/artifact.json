@@ -1,0 +1,17 @@
+{
+  "specVersion": 1,
+  "artifact": {
+    "id": "artifactd-presentation",
+    "name": "Artifactd — A home for agent-built artifacts",
+    "description": "A short presentation about Artifactd's local-first runtime for persistent interactive artifacts."
+  },
+  "code": {
+    "format": "files",
+    "entry": "index.html"
+  },
+  "runtime": {
+    "id": "web-static",
+    "version": 1
+  },
+  "capabilities": []
+}

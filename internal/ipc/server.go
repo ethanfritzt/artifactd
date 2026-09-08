@@ -16,6 +16,7 @@ import (
 	"artifactd/internal/edit"
 	"artifactd/internal/manifest"
 	"artifactd/internal/model"
+	"artifactd/internal/preview"
 	"artifactd/internal/protocol"
 	"artifactd/internal/registry"
 	"artifactd/internal/runtime"
@@ -24,6 +25,7 @@ import (
 
 const (
 	maxPublishBody = 50 << 20
+	maxPreviewBody = preview.MaxBytes + (1 << 20)
 	maxDataBody    = 5 << 20
 	maxSourcePath  = 4096
 )
@@ -41,15 +43,22 @@ type Server struct {
 	publicURL func(string) string
 	data      *runtime.Store
 	edit      *edit.Manager
+	previews  *preview.Manager
 }
 
 func NewServer(store *storage.Store, publicURL func(string) string, data *runtime.Store, editManager *edit.Manager) *Server {
 	return &Server{store: store, publicURL: publicURL, data: data, edit: editManager}
 }
 
+// SetPreviewManager enables temporary previews before the server starts.
+func (s *Server) SetPreviewManager(manager *preview.Manager) {
+	s.previews = manager
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.health)
+	mux.HandleFunc("/v1/previews", s.createPreview)
 	mux.HandleFunc("/v1/artifacts", s.list)
 	mux.HandleFunc("/v1/artifacts/publish", s.publish)
 	mux.HandleFunc("/v1/artifacts/", s.artifactRoute)
@@ -63,6 +72,91 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, protocol.HealthResponse{Status: "ok"})
+}
+
+func (s *Server) createPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.previews == nil {
+		writeError(w, http.StatusNotImplemented, "previews are unavailable")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxPreviewBody)
+	name, content, err := receivePreviewMultipart(r)
+	if err != nil {
+		writePreviewFailure(w, err)
+		return
+	}
+	document, err := s.previews.Create(name, content)
+	if err != nil {
+		writePreviewFailure(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, protocol.PreviewResponse{
+		ID:        document.ID,
+		Name:      document.Name,
+		URL:       s.publicURL(document.ID),
+		ExpiresAt: document.ExpiresAt,
+	})
+}
+
+func receivePreviewMultipart(r *http.Request) (string, []byte, error) {
+	reader, err := r.MultipartReader()
+	if err != nil {
+		return "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
+	}
+	part, err := reader.NextPart()
+	if err != nil {
+		return "", nil, &RequestError{Message: "preview file is required"}
+	}
+	if part.FormName() != "file" || part.FileName() == "" {
+		if closeErr := part.Close(); closeErr != nil {
+			return "", nil, fmt.Errorf("closing preview part: %w", closeErr)
+		}
+		return "", nil, &RequestError{Message: "preview file is required"}
+	}
+	name := part.FileName()
+	if err := preview.ValidateName(name); err != nil {
+		if closeErr := part.Close(); closeErr != nil {
+			return "", nil, fmt.Errorf("closing preview part: %w", closeErr)
+		}
+		return "", nil, &RequestError{Message: err.Error()}
+	}
+	content, readErr := io.ReadAll(io.LimitReader(part, preview.MaxBytes+1))
+	closeErr := part.Close()
+	if readErr != nil {
+		return "", nil, fmt.Errorf("reading preview file: %w", readErr)
+	}
+	if closeErr != nil {
+		return "", nil, fmt.Errorf("closing preview file: %w", closeErr)
+	}
+	if len(content) > preview.MaxBytes {
+		return "", nil, preview.ErrTooLarge
+	}
+	if _, err := reader.NextPart(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", nil, &RequestError{Message: "preview accepts exactly one file"}
+		}
+		return "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
+	}
+	return name, content, nil
+}
+
+func writePreviewFailure(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.Is(err, preview.ErrTooLarge) || errors.As(err, &maxErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, preview.ErrTooLarge.Error())
+		return
+	}
+	var requestErr *RequestError
+	var validationErr *preview.ValidationError
+	if errors.As(err, &requestErr) || errors.As(err, &validationErr) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeInternalError(w, err)
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
@@ -475,20 +569,12 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 
 	sourcePath, err := receiveMultipart(r, staging)
 	if err != nil {
-		if statusForError(err) >= http.StatusInternalServerError {
-			writeInternalError(w, err)
-			return
-		}
-		writeError(w, statusForError(err), userError(err))
+		writeRequestFailure(w, err)
 		return
 	}
 	result, err := s.store.PublishStaged(r.Context(), staging, sourcePath)
 	if err != nil {
-		if statusForError(err) >= http.StatusInternalServerError {
-			writeInternalError(w, err)
-			return
-		}
-		writeError(w, statusForError(err), userError(err))
+		writeRequestFailure(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, protocol.PublishResponse{
@@ -728,6 +814,15 @@ func writeError(w http.ResponseWriter, status int, message string) {
 func writeInternalError(w http.ResponseWriter, err error) {
 	slog.Error("request failed", "error", err)
 	writeError(w, http.StatusInternalServerError, "internal server error")
+}
+
+func writeRequestFailure(w http.ResponseWriter, err error) {
+	status := statusForError(err)
+	if status >= http.StatusInternalServerError {
+		writeInternalError(w, err)
+		return
+	}
+	writeError(w, status, userError(err))
 }
 
 func statusForError(err error) int {

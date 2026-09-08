@@ -43,6 +43,28 @@ Successful response:
 
 Publishing an existing ID creates the next immutable version and updates the current version. Publishing does not implicitly unarchive an artifact. Publish requests are limited to 50 MiB and 1,000 regular files; invalid manifests, symlinks, special files, and unsafe paths are rejected.
 
+## Create a Markdown preview
+
+```text
+POST /v1/previews
+Content-Type: multipart/form-data
+```
+
+The request contains exactly one `.md` or `.markdown` file part. It is limited to 5 MiB and does not include or disclose the source path. The daemon retains the content only in a bounded in-memory set, excludes it from the artifact registry, and expires it after at most one hour.
+
+Successful response:
+
+```json
+{
+  "id": "preview-0123456789abcdef0123456789abcdef",
+  "name": "README.md",
+  "url": "http://preview-0123456789abcdef0123456789abcdef.artifacts.localhost:7337/",
+  "expires_at": "2026-03-18T13:00:00Z"
+}
+```
+
+The preview URL is browser-readable, but preview creation remains available only through the user-restricted Unix socket.
+
 ## Get an artifact
 
 Fetch the current artifact metadata and version:

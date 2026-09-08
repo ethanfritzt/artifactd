@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"artifactd/internal/edit"
+	"artifactd/internal/markdown"
 	"artifactd/internal/model"
+	"artifactd/internal/preview"
 	"artifactd/internal/providers/filesystem"
 	"artifactd/internal/providers/system"
 	"artifactd/internal/registry"
@@ -187,6 +189,7 @@ type Server struct {
 	system     *system.Provider
 	filesystem *filesystem.Provider
 	edit       *edit.Manager
+	previews   *preview.Manager
 }
 
 func NewServer(
@@ -209,6 +212,11 @@ func NewServer(
 		filesystem: files,
 		edit:       editManager,
 	}
+}
+
+// SetPreviewManager enables temporary previews before the server starts.
+func (s *Server) SetPreviewManager(manager *preview.Manager) {
+	s.previews = manager
 }
 
 func (s *Server) Handler() http.Handler {
@@ -244,7 +252,49 @@ func (s *Server) serveArtifactHost(w http.ResponseWriter, r *http.Request, id st
 	if strings.HasPrefix(relative, "_artifactd/") {
 		runtimePath = strings.TrimPrefix(relative, "_artifactd/")
 	}
+	if s.previews != nil {
+		document, previewErr := s.previews.Get(id)
+		if previewErr == nil {
+			s.servePreview(w, r, document, relative, runtimePath)
+			return
+		}
+		if !errors.Is(previewErr, preview.ErrNotFound) {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+	}
 	s.serveArtifact(w, r, id, relative, runtimePath)
+}
+
+func (s *Server) servePreview(
+	w http.ResponseWriter,
+	r *http.Request,
+	document preview.Document,
+	relative,
+	runtimePath string,
+) {
+	if runtimePath == "markdown.css" {
+		s.serveMarkdownCSS(w, r)
+		return
+	}
+	if runtimePath == "navigation.css" {
+		s.serveNavigationCSS(w)
+		return
+	}
+	if relative != "" {
+		http.NotFound(w, r)
+		return
+	}
+	content, err := markdown.Render(document.Content, document.Name)
+	if err != nil {
+		http.Error(w, "could not render Markdown", http.StatusInternalServerError)
+		return
+	}
+	content = injectArtifactNavigation(content, s.publicURL(s.defaultID))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.ServeContent(w, r, document.Name, document.CreatedAt, bytes.NewReader(content))
 }
 
 // serveArtifact is shared by artifact-host and legacy-path routes so that both
@@ -323,6 +373,10 @@ func (s *Server) serveRuntime(w http.ResponseWriter, r *http.Request, artifactID
 	}
 	if len(parts) == 1 && parts[0] == "navigation.css" {
 		s.serveNavigationCSS(w)
+		return
+	}
+	if len(parts) == 1 && parts[0] == "markdown.css" {
+		s.serveMarkdownCSS(w, r)
 		return
 	}
 	if len(parts) == 1 && parts[0] == "events" {
@@ -496,6 +550,12 @@ func (s *Server) serveNavigationCSS(w http.ResponseWriter) {
 	}
 }
 
+func (s *Server) serveMarkdownCSS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	http.ServeContent(w, r, "markdown.css", time.Time{}, strings.NewReader(markdown.Stylesheet))
+}
+
 func (s *Server) serveFile(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -518,6 +578,10 @@ func (s *Server) serveFile(
 		s.serveHTML(w, r, filePath, decorate)
 		return
 	}
+	if markdown.IsFilename(filePath) {
+		s.serveMarkdown(w, r, filePath, decorate)
+		return
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		http.NotFound(w, r)
@@ -525,6 +589,39 @@ func (s *Server) serveFile(
 	}
 	defer func() { _ = file.Close() }()
 	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), file)
+}
+
+func (s *Server) serveMarkdown(
+	w http.ResponseWriter,
+	r *http.Request,
+	filePath string,
+	decorate bool,
+) {
+	info, err := os.Lstat(filePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	if info.Size() > markdown.MaxBytes {
+		http.Error(w, "Markdown document is too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	source, err := os.ReadFile(filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	content, err := markdown.Render(source, filepath.Base(filePath))
+	if err != nil {
+		http.Error(w, "could not render Markdown", http.StatusInternalServerError)
+		return
+	}
+	content = injectEditClient(content)
+	if decorate {
+		content = injectArtifactNavigation(content, s.publicURL(s.defaultID))
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	http.ServeContent(w, r, filepath.Base(filePath), info.ModTime(), bytes.NewReader(content))
 }
 
 func (s *Server) serveHTML(
