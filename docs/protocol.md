@@ -50,7 +50,7 @@ POST /v1/previews
 Content-Type: multipart/form-data
 ```
 
-The request contains exactly one `.md` or `.markdown` file part. It is limited to 5 MiB and does not include or disclose the source path. The daemon retains the content only in a bounded in-memory set, excludes it from the artifact registry, and expires it after at most one hour.
+The request contains exactly one `.md` or `.markdown` file part (limited to 5 MiB) and an absolute `source_path` field. The daemon retains the selected path, content hash, and a random save capability only in bounded memory; it does not collect sibling files or disclose the path in the response. A preview is excluded from the artifact registry and expires after at most one hour. Legacy clients may omit `source_path` and receive a read-only preview.
 
 Successful response:
 
@@ -63,7 +63,7 @@ Successful response:
 }
 ```
 
-The preview URL is browser-readable, but preview creation remains available only through the user-restricted Unix socket.
+The preview URL is browser-readable, but preview creation remains available only through the user-restricted Unix socket. Editable previews expose a same-origin `POST /_artifactd/save` endpoint guarded by the preview's bearer capability and exact Origin check; the endpoint writes only the selected file and returns `409 Conflict` if its content changed externally. Read-only previews do not expose saving. `GET /_artifactd/document.docx` creates a DOCX download from the current saved preview content (text and block order, with basic paragraph/list treatment; rich styling, table layout, and assets are not preserved). PDF export uses the browser print dialog.
 
 ## Get an artifact
 
@@ -210,9 +210,22 @@ GET /_artifactd/files?path=...&depth=...
 GET /_artifactd/data/{source}
 GET /_artifactd/edit
 GET /_artifactd/events
+POST /_artifactd/save             (editable temporary Markdown preview only)
+POST /_artifactd/render           (editable temporary Markdown draft rendering only)
+GET  /_artifactd/document.docx    (temporary Markdown preview only)
 ```
 
 `/_artifactd/library` returns the current artifact metadata from SQLite. `/_artifactd/system` returns CPU, memory, load, and process data. `/_artifactd/files` returns metadata scoped to the artifact's registered workspace. `/_artifactd/edit` returns the active editing session, and `/_artifactd/events` emits editing transitions over Server-Sent Events. The legacy path URL remains available for static content and redirects its artifact root to the artifact-specific origin.
+
+`/_artifactd/render` and `/_artifactd/save` require the preview's bearer save
+capability and an exact same-origin `Origin` header. Both accept a single
+`{"content":"Markdown source"}` JSON object with a decoded-source limit of
+5 MiB and a bounded JSON envelope. Render returns `{"html":"safe HTML fragment"}`
+without changing the file or saved preview. Save atomically writes the selected
+file and returns `{"saved":true,"html":"safe HTML fragment"}`, allowing the
+browser to update its saved baseline without a page reload. A source-file
+conflict returns `409` and leaves the browser draft intact. PDF and DOCX exports
+continue to use the saved version.
 
 ## Errors
 

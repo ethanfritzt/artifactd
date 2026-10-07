@@ -2,11 +2,14 @@ package web
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"artifactd/internal/docx"
 	"artifactd/internal/edit"
 	"artifactd/internal/markdown"
 	"artifactd/internal/model"
@@ -225,8 +229,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
+	previewMutation := r.Method == http.MethodPost &&
+		(r.URL.Path == "/_artifactd/save" || r.URL.Path == "/_artifactd/render")
+	allowed := r.Method == http.MethodGet || r.Method == http.MethodHead || previewMutation
+	if !allowed {
+		w.Header().Set("Allow", "GET, HEAD, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -277,6 +284,30 @@ func (s *Server) servePreview(
 		s.serveMarkdownCSS(w, r)
 		return
 	}
+	if runtimePath == "save" && r.Method == http.MethodPost {
+		s.savePreview(w, r, document)
+		return
+	}
+	if runtimePath == "render" && r.Method == http.MethodPost {
+		s.renderPreview(w, r, document)
+		return
+	}
+	if runtimePath == "markdown-editor.js" && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, markdownEditorScript)
+		return
+	}
+	if runtimePath == "markdown-editor.css" && r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = io.WriteString(w, markdownEditorStyles)
+		return
+	}
+	if runtimePath == "document.docx" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		s.exportPreviewDOCX(w, r, document)
+		return
+	}
 	if runtimePath == "navigation.css" {
 		s.serveNavigationCSS(w)
 		return
@@ -291,6 +322,13 @@ func (s *Server) servePreview(
 		return
 	}
 	content = injectArtifactNavigation(content, s.publicURL(s.defaultID))
+	if document.SaveToken != "" {
+		nonce := rand.Text()
+		// CodeMirror's generated styles use this per-response nonce, not unsafe-inline.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'nonce-"+nonce+
+			"'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+		content = injectPreviewEditor(content, document, s.publicURL(s.defaultID), nonce)
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -661,6 +699,174 @@ func injectEditClient(content []byte) []byte {
 </div>
 <script data-artifactd-edit src="/_artifactd/edit.js"></script>`
 	return injectBeforeBodyClose(content, injected)
+}
+
+func (s *Server) savePreview(w http.ResponseWriter, r *http.Request, document preview.Document) {
+	content, ok := readPreviewContent(w, r, document)
+	if !ok {
+		return
+	}
+	rendered, err := markdown.RenderBody(content)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not render Markdown"})
+		return
+	}
+	if err := s.previews.Save(document.ID, document.SaveToken, content); err != nil {
+		switch {
+		case errors.Is(err, preview.ErrNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		case errors.Is(err, preview.ErrUnauthorized):
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		case errors.Is(err, preview.ErrConflict):
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		case errors.Is(err, preview.ErrTooLarge):
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+		default:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save Markdown file"})
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "html": string(rendered)})
+}
+
+func (s *Server) renderPreview(w http.ResponseWriter, r *http.Request, document preview.Document) {
+	content, ok := readPreviewContent(w, r, document)
+	if !ok {
+		return
+	}
+	rendered, err := markdown.RenderBody(content)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not render Markdown"})
+		return
+	}
+	// Rendering a draft never changes the preview's saved content or selected file.
+	writeJSON(w, http.StatusOK, map[string]string{"html": string(rendered)})
+}
+
+func readPreviewContent(w http.ResponseWriter, r *http.Request, document preview.Document) ([]byte, bool) {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if !strings.EqualFold(r.Header.Get("Origin"), scheme+"://"+r.Host) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "same-origin request required"})
+		return nil, false
+	}
+	if document.SaveToken == "" || r.Header.Get("Authorization") != "Bearer "+document.SaveToken {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": preview.ErrUnauthorized.Error()})
+		return nil, false
+	}
+
+	// A JSON-escaped source byte can occupy six bytes (e.g. a control character).
+	// Bound both the envelope and decoded document without shrinking the 5 MiB limit.
+	r.Body = http.MaxBytesReader(w, r.Body, 6*preview.MaxBytes+1024)
+	var request struct {
+		Content *string `json:"content"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": preview.ErrTooLarge.Error()})
+			return nil, false
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Markdown content request"})
+		return nil, false
+	}
+	if request.Content == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Markdown content is required"})
+		return nil, false
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Markdown content request"})
+		return nil, false
+	}
+	if len(*request.Content) > preview.MaxBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": preview.ErrTooLarge.Error()})
+		return nil, false
+	}
+	return []byte(*request.Content), true
+}
+
+func (s *Server) exportPreviewDOCX(w http.ResponseWriter, r *http.Request, document preview.Document) {
+	content, err := docx.Render(document.Content)
+	if err != nil {
+		http.Error(w, "could not export Markdown document", http.StatusInternalServerError)
+		return
+	}
+	name := strings.TrimSuffix(document.Name, filepath.Ext(document.Name)) + ".docx"
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeContent(w, r, name, document.CreatedAt, bytes.NewReader(content))
+}
+
+func injectPreviewEditor(content []byte, document preview.Document, homeURL, nonce string) []byte {
+	header := `<link rel="stylesheet" href="/_artifactd/markdown-editor.css">
+<header class="artifactd-md-shell" data-save-token="` + html.EscapeString(document.SaveToken) + `" data-style-nonce="` + html.EscapeString(nonce) + `">
+  <div class="artifactd-md-bar">
+    <div class="artifactd-md-breadcrumb">
+      <a class="artifactd-md-back" href="` + html.EscapeString(homeURL) + `" aria-label="Back to Artifactd library" title="Back to library">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>
+      </a>
+      <span class="artifactd-md-filename" title="` + html.EscapeString(document.Name) + `">` + html.EscapeString(document.Name) + `</span>
+    </div>
+    <nav class="artifactd-md-actions" aria-label="Document actions">
+      <button type="button" class="artifactd-md-toggle" data-action="toggle-view" aria-label="Edit document" aria-pressed="false" aria-controls="artifactd-md-document artifactd-md-source" title="Toggle editing (Ctrl/Cmd+E)">
+        <svg class="artifactd-md-edit-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15Z"/></svg>
+        <svg class="artifactd-md-preview-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v15M3 4l9 2 9-2v14l-9 2-9-2Z"/></svg>
+        <span>Edit</span>
+      </button>
+      <button type="button" class="artifactd-md-save" data-action="save" disabled>Save</button>
+      <details class="artifactd-md-export">
+        <summary>Export <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></summary>
+        <div class="artifactd-md-export-panel">
+          <span class="artifactd-md-menu-label">Export saved document</span>
+          <button type="button" data-action="pdf" aria-label="Export PDF">
+            <span class="artifactd-md-format" aria-hidden="true">PDF</span>
+            <span><strong>PDF document</strong><small>Print or save a polished copy</small></span>
+          </button>
+          <a href="/_artifactd/document.docx" download aria-label="Export DOCX">
+            <span class="artifactd-md-format" aria-hidden="true">DOCX</span>
+            <span><strong>Word document</strong><small>Text &amp; basic formatting</small></span>
+          </a>
+          <p>Exports use the saved version, not unsaved edits.</p>
+        </div>
+      </details>
+    </nav>
+  </div>
+</header>`
+	editor := `<section class="artifactd-md-editor-wrap" aria-label="Source editor">
+  <div class="artifactd-md-editor-label"><label id="artifactd-md-source-label" for="artifactd-md-source">Markdown source</label></div>
+  <textarea id="artifactd-md-source" class="artifactd-md-editor" spellcheck="false">` + html.EscapeString(string(document.Content)) + `</textarea>
+</section>
+</div>
+<footer class="artifactd-md-context">
+  <div class="artifactd-md-status" role="status" aria-live="polite" data-state="saved">All changes saved</div>
+  <span class="artifactd-md-editing-hint">Ctrl/Cmd+S to save · Escape, then Tab to leave the editor</span>
+  <span class="artifactd-md-mode">Preview</span>
+</footer>
+<script src="/_artifactd/markdown-editor.js" defer></script>`
+	content = bytes.Replace(content, []byte(`<main class="artifactd-markdown">`),
+		[]byte(`<div class="artifactd-md-workspace"><main id="artifactd-md-document" class="artifactd-markdown">`), 1)
+	content = injectAfterBodyOpen(content, header)
+	return injectBeforeBodyClose(content, editor)
+}
+
+func injectAfterBodyOpen(content []byte, injected string) []byte {
+	const openingBody = "<body>"
+	index := bytes.Index(bytes.ToLower(content), []byte(openingBody))
+	if index < 0 {
+		return content
+	}
+	index += len(openingBody)
+	result := make([]byte, 0, len(content)+len(injected)+1)
+	result = append(result, content[:index]...)
+	result = append(result, '\n')
+	result = append(result, injected...)
+	result = append(result, content[index:]...)
+	return result
 }
 
 func injectArtifactNavigation(content []byte, homeURL string) []byte {

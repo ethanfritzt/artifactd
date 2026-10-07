@@ -43,6 +43,7 @@ type PreviewResponse struct {
 	Name      string    `json:"name"`
 	URL       string    `json:"url"`
 	ExpiresAt time.Time `json:"expires_at"`
+	Editable  bool      `json:"editable,omitempty"`
 }
 
 type EditBeginRequest struct {

@@ -1,6 +1,8 @@
 package web
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -299,6 +301,117 @@ func TestServerServesTemporaryMarkdownPreview(t *testing.T) {
 	server.Handler().ServeHTTP(cssRecorder, cssRequest)
 	if cssRecorder.Code != http.StatusOK || !strings.Contains(cssRecorder.Body.String(), ".artifactd-markdown") {
 		t.Fatalf("Markdown stylesheet response = %d %s", cssRecorder.Code, cssRecorder.Body.String())
+	}
+}
+
+func TestEditableMarkdownPreviewSaveAndDOCXExport(t *testing.T) {
+	store, err := OpenTestStore(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	path := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(path, []byte("# Before"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager := preview.NewManager()
+	document, err := manager.CreateEditable("notes.md", path, []byte("# Before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newTestServer(store)
+	server.SetPreviewManager(manager)
+	host := document.ID + ".artifacts.localhost:7337"
+
+	page := httptest.NewRecorder()
+	pageRequest := httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil)
+	pageRequest.Host = host
+	server.Handler().ServeHTTP(page, pageRequest)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Export PDF") || !strings.Contains(page.Body.String(), "Export DOCX") || !strings.Contains(page.Body.String(), "Markdown source") {
+		t.Fatalf("editable preview = %d %s", page.Code, page.Body.String())
+	}
+	if strings.Index(page.Body.String(), "artifactd-md-shell") > strings.Index(page.Body.String(), "<main id=\"artifactd-md-document\"") {
+		t.Fatal("Markdown controls should appear before the document")
+	}
+	for _, asset := range []string{"markdown-editor.css", "markdown-editor.js"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "http://"+host+"/_artifactd/"+asset, nil)
+		request.Host = host
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK || recorder.Body.Len() == 0 {
+			t.Fatalf("editor asset %s = %d", asset, recorder.Code)
+		}
+	}
+
+	body, err := json.Marshal(map[string]string{"content": "# After"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := httptest.NewRecorder()
+	blockedRequest := httptest.NewRequest(http.MethodPost, "http://"+host+"/_artifactd/save", bytes.NewReader(body))
+	blockedRequest.Host = host
+	blockedRequest.Header.Set("Origin", "http://attacker.invalid")
+	blockedRequest.Header.Set("Authorization", "Bearer "+document.SaveToken)
+	server.Handler().ServeHTTP(blocked, blockedRequest)
+	if blocked.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin save status = %d, want 403", blocked.Code)
+	}
+
+	save := httptest.NewRecorder()
+	saveRequest := httptest.NewRequest(http.MethodPost, "http://"+host+"/_artifactd/save", bytes.NewReader(body))
+	saveRequest.Host = host
+	saveRequest.Header.Set("Origin", "http://"+host)
+	saveRequest.Header.Set("Authorization", "Bearer "+document.SaveToken)
+	saveRequest.Header.Set("Content-Type", "application/json")
+	server.Handler().ServeHTTP(save, saveRequest)
+	if save.Code != http.StatusOK {
+		t.Fatalf("save response = %d %s", save.Code, save.Body.String())
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil || string(updated) != "# After" {
+		t.Fatalf("saved Markdown = %q, %v", updated, err)
+	}
+
+	export := httptest.NewRecorder()
+	exportRequest := httptest.NewRequest(http.MethodGet, "http://"+host+"/_artifactd/document.docx", nil)
+	exportRequest.Host = host
+	server.Handler().ServeHTTP(export, exportRequest)
+	if export.Code != http.StatusOK || !strings.Contains(export.Header().Get("Content-Type"), "wordprocessingml.document") || export.Body.Len() == 0 {
+		t.Fatalf("DOCX export = %d %q, %d bytes", export.Code, export.Header().Get("Content-Type"), export.Body.Len())
+	}
+}
+
+func TestPreviewEditorEscapesDocumentMetadata(t *testing.T) {
+	t.Parallel()
+	document := preview.Document{
+		Name:      `notes-"<draft>.md`,
+		SaveToken: "test-capability",
+		Content:   []byte("</textarea><script>alert(1)</script>"),
+	}
+	page := []byte(`<html><body><main class="artifactd-markdown">Document</main></body></html>`)
+	result := string(injectPreviewEditor(page, document, "http://artifacts.localhost/?a=1&b=2", "test-nonce"))
+	for _, want := range []string{
+		`notes-&#34;&lt;draft&gt;.md`,
+		`&lt;/textarea&gt;&lt;script&gt;alert(1)&lt;/script&gt;`,
+		`http://artifacts.localhost/?a=1&amp;b=2`,
+		`<details class="artifactd-md-export">`,
+		`aria-controls="artifactd-md-document artifactd-md-source"`,
+		`<main id="artifactd-md-document"`,
+		`<label id="artifactd-md-source-label" for="artifactd-md-source">`,
+		`data-style-nonce="test-nonce"`,
+		`data-action="toggle-view"`,
+		`aria-label="Edit document"`,
+		`class="artifactd-md-workspace"`,
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("editor page missing %q", want)
+		}
+	}
+	if strings.Contains(result, `aria-label="Markdown formatting"`) {
+		t.Fatal("editor page contains the removed formatting toolbar")
+	}
+	if strings.Count(result, "</textarea>") != 1 || strings.Contains(result, "<script>alert") {
+		t.Fatal("Markdown source escaped its textarea")
 	}
 }
 

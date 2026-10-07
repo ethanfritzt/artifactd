@@ -20,6 +20,26 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  markdown-editor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: internal/web/editor/package-lock.json
+      - run: npm ci --prefix internal/web/editor
+      - run: npm run --prefix internal/web/editor build
+      - run: git diff --exit-code -- internal/web/assets
+      - run: npx playwright install --with-deps chromium
+        working-directory: internal/web/editor
+      - run: make editor-test
+
   lint:
     runs-on: ubuntu-latest
     steps:

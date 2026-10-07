@@ -124,8 +124,15 @@ func TestPreviewHandler(t *testing.T) {
 	)
 	server.SetPreviewManager(previewManager)
 
+	path := filepath.Join(t.TempDir(), "README.md")
+	if err := os.WriteFile(path, []byte("# Preview"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("source_path", path); err != nil {
+		t.Fatal(err)
+	}
 	part, err := writer.CreateFormFile("file", "README.md")
 	if err != nil {
 		t.Fatal(err)
@@ -147,15 +154,15 @@ func TestPreviewHandler(t *testing.T) {
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response.ID == "" || response.Name != "README.md" || response.URL == "" {
+	if response.ID == "" || response.Name != "README.md" || response.URL == "" || !response.Editable {
 		t.Fatalf("response = %+v", response)
 	}
 	document, err := previewManager.Get(response.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(document.Content) != "# Preview" {
-		t.Fatalf("preview content = %q", document.Content)
+	if string(document.Content) != "# Preview" || document.SaveToken == "" {
+		t.Fatalf("preview document = %+v", document)
 	}
 }
 

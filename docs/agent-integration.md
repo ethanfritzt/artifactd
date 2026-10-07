@@ -19,7 +19,7 @@ Use `artifact create --path <directory> --id <id>` only when repository-local
 source is intentional.
 ```
 
-For a request that only needs to display an existing Markdown file, use `artifact preview <file> --open` instead of creating a durable artifact. The preview contains only that file, stays out of the library, and expires automatically.
+For a request that only needs to work with an existing Markdown file, use `artifact preview <file> --open` instead of creating a durable artifact. The temporary preview contains only that file, stays out of the library, expires automatically, and offers explicit editing/saving plus PDF and DOCX export.
 
 This keeps `artifactd` agent-agnostic. Pi, Codex, Claude Code, OpenCode, shell scripts, and humans can all use the same interface. A source directory under a registered workspace is associated automatically when published if the daemon verifies that its complete file set and contents match the uploaded package; otherwise the publish remains unassociated.
 

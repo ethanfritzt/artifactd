@@ -32,6 +32,9 @@ The runtime:
 - render Markdown with raw HTML disabled, dangerous URL filtering, and a 5 MiB document limit
 - keep temporary Markdown previews bounded, in memory, absent from the registry, and unavailable within one hour or after daemon shutdown
 - upload only the explicitly selected preview file rather than implicitly publishing adjacent files
+- scope Markdown preview saving to one selected regular file through a random in-memory capability, exact same-origin checks, atomic replacement, and content-hash conflict detection
+- render browser drafts only on live editable preview origins with the same capability/origin checks, bounded input, and safe renderer; draft rendering never changes saved content
+- serve the Markdown editor locally, allowing its generated styles through a per-response CSP nonce rather than unrestricted inline styles or third-party script origins
 - document the trust model prominently
 
 A static artifact can still make network requests permitted by the browser, including requests to other local services. Artifactd accepts the legacy path form on the configured library host and local loopback aliases. The current browser isolation model uses artifact-specific origins validated from the configured host suffix, restrictive response headers, and a same-origin CSP. That CSP also prevents rendered Markdown from automatically loading remote images. External links remain user-initiated browser navigation. Any expansion of this model requires a new threat-model review.

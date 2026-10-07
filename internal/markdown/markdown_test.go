@@ -5,6 +5,26 @@ import (
 	"testing"
 )
 
+func TestRenderBodyMatchesDocumentAndDisablesUnsafeContent(t *testing.T) {
+	t.Parallel()
+	source := []byte("# Notes\n\n- [x] done\n\n<script>alert(1)</script>\n\n[bad](javascript:alert(1))")
+	body, err := RenderBody(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Render(source, "Notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(document), string(body)) || strings.Contains(string(body), "<script>") ||
+		strings.Contains(strings.ToLower(string(body)), `href="javascript:`) {
+		t.Fatalf("unsafe or inconsistent fragment: %s", body)
+	}
+	if _, err := RenderBody([]byte(strings.Repeat("x", MaxBytes+1))); err == nil {
+		t.Fatal("RenderBody accepted an oversized document")
+	}
+}
+
 func TestRenderSupportsGitHubFlavoredMarkdown(t *testing.T) {
 	source := []byte("# Notes\n\n- [x] done\n\n| A | B |\n|---|---|\n| 1 | 2 |\n")
 	result, err := Render(source, "Notes")

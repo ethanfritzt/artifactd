@@ -84,12 +84,17 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxPreviewBody)
-	name, content, err := receivePreviewMultipart(r)
+	name, sourcePath, content, err := receivePreviewMultipart(r)
 	if err != nil {
 		writePreviewFailure(w, err)
 		return
 	}
-	document, err := s.previews.Create(name, content)
+	var document preview.Document
+	if sourcePath != "" {
+		document, err = s.previews.CreateEditable(name, sourcePath, content)
+	} else {
+		document, err = s.previews.Create(name, content)
+	}
 	if err != nil {
 		writePreviewFailure(w, err)
 		return
@@ -99,49 +104,69 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request) {
 		Name:      document.Name,
 		URL:       s.publicURL(document.ID),
 		ExpiresAt: document.ExpiresAt,
+		Editable:  document.SaveToken != "",
 	})
 }
 
-func receivePreviewMultipart(r *http.Request) (string, []byte, error) {
+func receivePreviewMultipart(r *http.Request) (string, string, []byte, error) {
 	reader, err := r.MultipartReader()
 	if err != nil {
-		return "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
+		return "", "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
 	}
-	part, err := reader.NextPart()
-	if err != nil {
-		return "", nil, &RequestError{Message: "preview file is required"}
-	}
-	if part.FormName() != "file" || part.FileName() == "" {
-		if closeErr := part.Close(); closeErr != nil {
-			return "", nil, fmt.Errorf("closing preview part: %w", closeErr)
+	var name, sourcePath string
+	var content []byte
+	var sourcePathSeen bool
+	for {
+		part, err := reader.NextPart()
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		return "", nil, &RequestError{Message: "preview file is required"}
-	}
-	name := part.FileName()
-	if err := preview.ValidateName(name); err != nil {
-		if closeErr := part.Close(); closeErr != nil {
-			return "", nil, fmt.Errorf("closing preview part: %w", closeErr)
+		if err != nil {
+			return "", "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
 		}
-		return "", nil, &RequestError{Message: err.Error()}
-	}
-	content, readErr := io.ReadAll(io.LimitReader(part, preview.MaxBytes+1))
-	closeErr := part.Close()
-	if readErr != nil {
-		return "", nil, fmt.Errorf("reading preview file: %w", readErr)
-	}
-	if closeErr != nil {
-		return "", nil, fmt.Errorf("closing preview file: %w", closeErr)
-	}
-	if len(content) > preview.MaxBytes {
-		return "", nil, preview.ErrTooLarge
-	}
-	if _, err := reader.NextPart(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return "", nil, &RequestError{Message: "preview accepts exactly one file"}
+		switch part.FormName() {
+		case "source_path":
+			if sourcePathSeen {
+				_ = part.Close()
+				return "", "", nil, &RequestError{Message: "preview accepts one source path"}
+			}
+			sourcePathSeen = true
+			value, readErr := io.ReadAll(io.LimitReader(part, maxSourcePath+1))
+			closeErr := part.Close()
+			if readErr != nil || closeErr != nil {
+				return "", "", nil, errors.Join(readErr, closeErr)
+			}
+			if len(value) == 0 || len(value) > maxSourcePath || !filepath.IsAbs(string(value)) || filepath.Clean(string(value)) != string(value) {
+				return "", "", nil, &RequestError{Message: "invalid Markdown source path"}
+			}
+			sourcePath = string(value)
+		case "file":
+			if name != "" || part.FileName() == "" {
+				_ = part.Close()
+				return "", "", nil, &RequestError{Message: "preview accepts exactly one file"}
+			}
+			name = part.FileName()
+			if err := preview.ValidateName(name); err != nil {
+				_ = part.Close()
+				return "", "", nil, &RequestError{Message: err.Error()}
+			}
+			content, err = io.ReadAll(io.LimitReader(part, preview.MaxBytes+1))
+			closeErr := part.Close()
+			if err != nil || closeErr != nil {
+				return "", "", nil, errors.Join(err, closeErr)
+			}
+			if len(content) > preview.MaxBytes {
+				return "", "", nil, preview.ErrTooLarge
+			}
+		default:
+			_ = part.Close()
+			return "", "", nil, &RequestError{Message: "unexpected preview form field"}
 		}
-		return "", nil, &RequestError{Message: fmt.Sprintf("reading preview form: %v", err)}
 	}
-	return name, content, nil
+	if name == "" {
+		return "", "", nil, &RequestError{Message: "preview file is required"}
+	}
+	return name, sourcePath, content, nil
 }
 
 func writePreviewFailure(w http.ResponseWriter, err error) {
@@ -152,6 +177,10 @@ func writePreviewFailure(w http.ResponseWriter, err error) {
 	}
 	var requestErr *RequestError
 	var validationErr *preview.ValidationError
+	if errors.Is(err, preview.ErrConflict) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.As(err, &requestErr) || errors.As(err, &validationErr) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

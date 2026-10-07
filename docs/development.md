@@ -11,11 +11,36 @@ Build both native binaries:
 make build
 ```
 
-Validate the repository's raw static artifacts (there is no Node build step):
+Validate the repository's raw static artifacts (no Node build is needed for artifacts or normal Go builds):
 
 ```bash
 make web-build
 ```
+
+### Markdown editor assets
+
+The daemon-owned Markdown editor uses locally bundled CodeMirror 6. Its
+generated JavaScript and third-party license notices in `internal/web/assets/`
+are committed and embedded into the Go binary. There are no CDN requests and
+the daemon never runs Node. Only editor development needs Node/npm:
+
+```bash
+make editor-build
+# Install a test browser once:
+cd internal/web/editor && npx playwright install chromium && cd ../../..
+make editor-test
+# Alternatively use a locally installed Chromium-compatible browser:
+CHROME_PATH=/usr/bin/google-chrome make editor-test
+```
+
+Edit `internal/web/editor/editor.js`, then regenerate the bundle with
+`npm run --prefix internal/web/editor build`. Commit both source and generated
+assets. The lockfile pins the bundler and editor dependencies.
+The optional `browser`-tagged Go test starts isolated preview fixtures and runs
+Playwright coverage for draft preservation, formatting, save/conflict handling,
+preview races, responsive layouts, dark mode, large files, CSP, and print styles.
+
+### Go validation
 
 Run the test suite and static checks:
 

@@ -232,6 +232,13 @@ func (c *Client) Preview(ctx context.Context, path string) (protocol.PreviewResp
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return protocol.PreviewResponse{}, fmt.Errorf("resolving Markdown file: %w", err)
+	}
+	if err := writer.WriteField("source_path", filepath.Clean(absolutePath)); err != nil {
+		return protocol.PreviewResponse{}, fmt.Errorf("writing preview source path: %w", err)
+	}
 	part, err := writer.CreateFormFile("file", name)
 	if err != nil {
 		return protocol.PreviewResponse{}, fmt.Errorf("creating preview upload: %w", err)

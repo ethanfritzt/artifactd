@@ -83,7 +83,8 @@ func IsFilename(name string) bool {
 	return extension == ".md" || extension == ".markdown"
 }
 
-func Render(source []byte, title string) ([]byte, error) {
+// RenderBody renders a safe HTML fragment using the same engine as full documents.
+func RenderBody(source []byte) ([]byte, error) {
 	if len(source) > MaxBytes {
 		return nil, fmt.Errorf("markdown document exceeds %d bytes", MaxBytes)
 	}
@@ -97,6 +98,15 @@ func Render(source []byte, title string) ([]byte, error) {
 		return nil, fmt.Errorf("rendering markdown: %w", err)
 	}
 
+	return body.Bytes(), nil
+}
+
+func Render(source []byte, title string) ([]byte, error) {
+	body, err := RenderBody(source)
+	if err != nil {
+		return nil, err
+	}
+
 	var document bytes.Buffer
 	document.WriteString("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n")
 	document.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>")
@@ -104,7 +114,7 @@ func Render(source []byte, title string) ([]byte, error) {
 	document.WriteString("</title>\n<link rel=\"stylesheet\" href=\"/_artifactd/markdown.css\">\n</head>\n<body>\n<main class=\"artifactd-markdown\">\n")
 	// Goldmark escapes raw HTML and dangerous link destinations unless its
 	// unsafe renderer option is explicitly enabled. Artifactd never enables it.
-	document.Write(body.Bytes())
+	document.Write(body)
 	document.WriteString("</main>\n</body>\n</html>\n")
 	return document.Bytes(), nil
 }

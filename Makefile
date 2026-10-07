@@ -1,4 +1,4 @@
-.PHONY: build web-build test vet fmt lint install clean
+.PHONY: build web-build editor-build editor-test test vet fmt lint install clean
 
 VERSION ?= dev
 LDFLAGS := -X artifactd/internal/version.Value=$(VERSION)
@@ -15,6 +15,15 @@ web-build:
 		test -s "$$directory/artifact.json"; \
 		test -s "$$directory/index.html"; \
 	done
+
+# Developer-only rebuild; the generated bundle is committed and embedded by Go.
+editor-build:
+	npm ci --prefix internal/web/editor
+	npm run --prefix internal/web/editor build
+
+# Install Playwright Chromium first, or set CHROME_PATH to an existing browser.
+editor-test:
+	npm run --prefix internal/web/editor test
 
 test:
 	go test ./...

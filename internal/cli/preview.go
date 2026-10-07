@@ -14,7 +14,7 @@ func previewCommand(app *Application) *cobra.Command {
 	var open, desktopLaunch bool
 	command := &cobra.Command{
 		Use:   "preview <markdown-file>",
-		Short: "Open a temporary Markdown preview in Artifactd",
+		Short: "Open an editable temporary Markdown preview in Artifactd",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := runPreview(cmd, app, args[0], open); err != nil {

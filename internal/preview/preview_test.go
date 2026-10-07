@@ -37,6 +37,40 @@ func TestManagerRejectsOversizedDocument(t *testing.T) {
 	}
 }
 
+func TestEditablePreviewSaveIsScopedAndDetectsConflicts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notes.md")
+	original := []byte("# Original")
+	if err := os.WriteFile(path, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager()
+	document, err := manager.CreateEditable("notes.md", path, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Save(document.ID, "wrong-token", []byte("# Changed")); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("Save() error = %v, want ErrUnauthorized", err)
+	}
+	updated := []byte("# Updated")
+	if err := manager.Save(document.ID, document.SaveToken, updated); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(updated) {
+		t.Fatalf("saved source = %q, %v", got, err)
+	}
+	previewDocument, err := manager.Get(document.ID)
+	if err != nil || string(previewDocument.Content) != string(updated) {
+		t.Fatalf("updated preview = %q, %v", previewDocument.Content, err)
+	}
+	if err := os.WriteFile(path, []byte("# External edit"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Save(document.ID, document.SaveToken, []byte("# Lost update")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("Save() error = %v, want ErrConflict", err)
+	}
+}
+
 func TestLoadFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "notes.md")
 	if err := os.WriteFile(path, []byte("# Notes"), 0o640); err != nil {

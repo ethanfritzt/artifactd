@@ -66,7 +66,7 @@ Current capabilities:
 - a small `artifact.json` manifest
 - standalone static artifacts, including rendered Markdown entrypoints
 - dependency-free HTML, CSS, and JavaScript scaffolding via `artifact create --id <id>`
-- temporary Markdown viewing via `artifact preview <file> --open`
+- temporary Markdown previews with source editing, safe save, PDF print, and DOCX export via `artifact preview <file> --open`
 - `artifact create`, `publish`, `list`, `archive`, `unarchive`, `edit`, `versions`, and `restore` (`create` auto-publishes; `--open` launches the result)
 - Go `artifactd` daemon with JSON-over-Unix-socket IPC
 - SQLite-backed metadata registry
